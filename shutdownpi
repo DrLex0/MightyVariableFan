@@ -1,0 +1,6 @@
+#!/bin/sh
+# Shuts down after 3 seconds in a forked process.
+
+(sleep 3; sudo poweroff) &
+echo "Shutdown initiated..."
+

@@ -1,0 +1,14 @@
+#!/bin/sh
+
+SERVER_LOG=/var/log/pwm_server.log
+DETECT_LOG=/var/log/beepdetect.log
+
+# Move previous logs to /tmp so they can be inspected in case something went
+# wrong last time. Moreover, this avoids overwriting the same inodes every time
+# hence avoids wear problems on solid state disks.
+[ -f "$SERVER_LOG" ] && mv -f "$SERVER_LOG" /tmp/old_pwm_server.log
+[ -f "$DETECT_LOG" ] && mv -f "$DETECT_LOG" /tmp/old_beepdetect.log
+
+nohup su -c /usr/local/bin/pwm_server.py pi 2>&1 > $SERVER_LOG &
+nohup nice -n -15 /usr/local/bin/beepdetect.py 2>&1 > $DETECT_LOG &
+
