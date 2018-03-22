@@ -3,8 +3,6 @@
 # also offering a crude web interface to manually control the PWM.
 # The server can be switched to manual override mode, which requires every control
 # request to have a 'manual=1' argument.
-#
-# TODO: better HTML output with mobile-friendly CSS!
 
 import cherrypy
 import os
@@ -17,6 +15,7 @@ import RPi.GPIO as GPIO
 
 
 SERVER_PORT = 8080
+STATIC_CONTENT_DIR = "/home/pi/pwm_server"
 
 # The GPIO pin to use.
 # The software PWM in RPi.GPIO seems decent enough for controlling a fan because minor jitter doesn't matter. However,
@@ -40,7 +39,7 @@ MACHINE_NAME = "Raspberry Pi"
 
 class PWMController(object):
   """Allows to control a GPIO pin on the Raspberry Pi with PWM output, with support for 'kickstarting' the output
-  in case of low target speeds."""
+  to help with starting at low target speeds, and faster transitioning to higher speeds."""
   def __init__(self, pin, freq, kickstart=True):
     self.kickstart = kickstart
     self.duty = 0
@@ -119,18 +118,20 @@ class GpioServer(object):
       sys.exit(0)
 
   def server_status(self):
-    # This is the main page that will be returned upon every normal successful request.
-    # Eventually I want this to be a simple page that can be used to control all basic functions of the server from a
-    # smallish touch display.
+    """This is the main page that will be returned upon every normal successful request.
+    This should be be a simple page that can be used to control all basic functions of the server from a
+    smallish touch display."""
     pwm_toggle = "<a href='/disable?manual=1'>Disable PWM</a>" if self.active else "<a href='/enable?manual=1'>Enable PWM</a>"
     manual_toggle = "<a href='/man_override?enable=0'>Disable manual override</a>" if self.override else "<a href='/man_override?enable=1'>Enable manual override</a>"
     pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty) for duty in [10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
     shutdown = "<br><a href='/shutdown'>Shutdown</a>"
-    return "PWM status: active = {}, duty cycle = <b>{}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
-      self.active, self.duty, self.override, pwm_toggle, manual_toggle, " ".join(pwm_presets), shutdown)
+    return GpioServer.html("PWM Server on {}".format(MACHINE_NAME),
+      "PWM status: active = {}, duty cycle = <b>{}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
+        self.active, self.duty, self.override, pwm_toggle, manual_toggle, " ".join(pwm_presets), shutdown))
 
   def needs_override(self):
-    return "Ignoring this request because the server is in manual override mode, and the request lacks the 'manual' parameter.<br><a href='/'>Back</a>"
+    return GpioServer.html("Manual override in effect",
+      "Ignoring this request because the server is in manual override mode, and the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
   @cherrypy.expose
   def index(self):
@@ -138,11 +139,11 @@ class GpioServer(object):
 
   @cherrypy.expose
   def setduty(self, d, manual=None):
-    # d must be an integer between 0 and 100, where 0 is off and 100 is full power.
+    """@d must be an integer between 0 and 100, where 0 is off and 100 is full power."""
     try:
       duty_value = int(d)
       if duty_value < 0 or duty_value > 100:
-        raise ValueError("Suckage")
+        raise ValueError("value out of range")
     except ValueError as err:
       # 422 was originally intended for WebDAV, but it has become a more general response for 'invalid parameter value'.
       raise cherrypy.HTTPError(422, "Invalid value '{}' for d parameter: it must be an integer between 0 and 100 ({})".format(d, err))
@@ -180,26 +181,52 @@ class GpioServer(object):
 
   @cherrypy.expose
   def shutdown(self, token=None):
-    # This is provided to allow shutting down the Pi cleanly from a web interface, which is better than just pulling
-    # the power. To minimize the risk of accidentally shutting down, e.g. because some browser tries to prefetch a
-    # page or reloads it from history, a token is generated when loading this URL, and only if the URL is reinvoked
-    # with this token, will the shutdown be initiated.
+    """This is provided to allow shutting down the Pi cleanly from a web interface, which is better than just pulling
+    the power. To minimize the risk of accidentally shutting down, e.g. because some browser tries to prefetch a
+    page or reloads it from history, a token is generated when loading this URL, and only if the URL is reinvoked
+    with this token, will the shutdown be initiated."""
     if token:
       if token == self.shutdown_token:
         return self.shutdown_machine()
       else:
-        return "Invalid shutdown token. Your browser is probably trying to reload an old page.<br><a href='/'>Return to main page.</a>"
+        return GpioServer.html("Shutdown request ignored",
+          "Invalid shutdown token. Your browser is probably trying to reload an old page.<br><a href='/'>Return to main page.</a>")
     else:
       self.shutdown_token = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(16))
-      return "Really shutdown the {}?&nbsp <a href='/shutdown?token={}'>Yes</a> <a href='/'>No!</a>".format(
-             MACHINE_NAME, self.shutdown_token)
+      return GpioServer.html("Confirm shutdown",
+        "Really shutdown the {}?&nbsp <a href='/shutdown?token={}'>Yes</a> <a href='/'>No!</a>".format(
+          MACHINE_NAME, self.shutdown_token))
+
+    @staticmethod
+    def html(title, body):
+      """Wrap the body HTML in a mobile-friendly HTML5 page with given title and CSS file 'style.css' from
+      the STATIC_CONTENT_DIR."""
+      return """<!DOCTYPE html>
+<HTML>
+<HEAD>
+<TITLE>{}</TITLE>
+<META name="viewport" content="width=device-width, initial-scale=1.0">
+<LINK rel="stylesheet" href="/style.css" type="text/css">
+</HEAD>
+<BODY>
+{}
+</BODY>
+</HTML>
+""".format(title, body)
 
 
 if __name__ == '__main__':
+  # TODO: command-line arguments
   # TODO: I might want to configure the server for production mode
   cherrypy.config.update({
     'server.socket_port': SERVER_PORT,
     'server.socket_host': '0.0.0.0'
   })
+  pwm_app_config = {
+    "/": {
+      'tools.staticdir.on': True,
+      'tools.staticdir.dir': STATIC_CONTENT_DIR
+    }
+  }
   cherrypy.engine.subscribe('stop', PWMController.shutdown)
-  cherrypy.quickstart(GpioServer(ramp_up_test=True))  # TODO: command-line arguments
+  cherrypy.quickstart(GpioServer(ramp_up_test=True), '/', pwm_app_config)
