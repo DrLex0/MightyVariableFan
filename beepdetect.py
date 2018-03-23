@@ -260,7 +260,7 @@ def start_detecting():
         # It's party time!
         sequence = [sig[1] for sig in detected]
         value = seq_to_value(sequence)
-        duty = int(round(float(value) * 100.0 / 64))
+        duty = round(float(value) * 100.0 / 64, 2)
         print "DETECTION: PWM {}%".format(duty)
         if DEBUG: print "  {} -> {} = {}%".format("-".join([str(s) for s in sequence]), value, duty)
         sys.stdout.flush()  # If there's one thing we want to see immediately in logs, it's this.

@@ -42,7 +42,7 @@ class PWMController(object):
   to help with starting at low target speeds, and faster transitioning to higher speeds."""
   def __init__(self, pin, freq, kickstart=True):
     self.kickstart = kickstart
-    self.duty = 0
+    self.duty = 0.0
     GPIO.setmode(GPIO.BOARD)
     GPIO.setup(pin, GPIO.OUT)
     self.pwm_out = GPIO.PWM(pin, freq)
@@ -58,7 +58,7 @@ class PWMController(object):
     if duty:
       do_kickstart = kick_override if kick_override != None else self.kickstart
       # Don't bother with kickstart if the target DC is near 1 anyway
-      if do_kickstart and duty > self.duty and duty < 95:
+      if do_kickstart and duty > self.duty and duty < 95.0:
         kick_duration = (duty - self.duty) * KICK_FACTOR
         if self.duty == 0 and kick_duration < KICK_LAUNCH:
           kick_duration = KICK_LAUNCH
@@ -88,7 +88,7 @@ class PWMController(object):
 class GpioServer(object):
   def __init__(self, ramp_up_test=False):
     self.override = False
-    self.duty = 0
+    self.duty = 0.0
     self.active = False
     self.pwm = PWMController(PWM_PIN, PWM_FREQ)
     if ramp_up_test:
@@ -123,10 +123,10 @@ class GpioServer(object):
     smallish touch display."""
     pwm_toggle = "<a href='/disable?manual=1'>Disable PWM</a>" if self.active else "<a href='/enable?manual=1'>Enable PWM</a>"
     manual_toggle = "<a href='/man_override?enable=0'>Disable manual override</a>" if self.override else "<a href='/man_override?enable=1'>Enable manual override</a>"
-    pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty) for duty in [10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
+    pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty) for duty in [0, 10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
     shutdown = "<br><a href='/shutdown'>Shutdown</a>"
     return GpioServer.html("PWM Server on {}".format(MACHINE_NAME),
-      "PWM status: active = {}, duty cycle = <b>{}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
+      "PWM status: active = {}, duty cycle = <b>{:.2f}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
         self.active, self.duty, self.override, pwm_toggle, manual_toggle, " ".join(pwm_presets), shutdown))
 
   def needs_override(self):
@@ -139,14 +139,14 @@ class GpioServer(object):
 
   @cherrypy.expose
   def setduty(self, d, manual=None):
-    """@d must be an integer between 0 and 100, where 0 is off and 100 is full power."""
+    """@d must be a number between 0.0 and 100.0, where 0 is off and 100 is full power."""
     try:
-      duty_value = int(d)
+      duty_value = float(d)
       if duty_value < 0 or duty_value > 100:
         raise ValueError("value out of range")
     except ValueError as err:
       # 422 was originally intended for WebDAV, but it has become a more general response for 'invalid parameter value'.
-      raise cherrypy.HTTPError(422, "Invalid value '{}' for d parameter: it must be an integer between 0 and 100 ({})".format(d, err))
+      raise cherrypy.HTTPError(422, "Invalid value '{}' for d parameter: it must be a number between 0.0 and 100.0 ({})".format(d, err))
     if self.override and not manual:
       return self.needs_override()
 
@@ -197,11 +197,11 @@ class GpioServer(object):
         "Really shutdown the {}?&nbsp <a href='/shutdown?token={}'>Yes</a> <a href='/'>No!</a>".format(
           MACHINE_NAME, self.shutdown_token))
 
-    @staticmethod
-    def html(title, body):
-      """Wrap the body HTML in a mobile-friendly HTML5 page with given title and CSS file 'style.css' from
-      the STATIC_CONTENT_DIR."""
-      return """<!DOCTYPE html>
+  @staticmethod
+  def html(title, body):
+    """Wrap the body HTML in a mobile-friendly HTML5 page with given title and CSS file 'style.css' from
+    the STATIC_CONTENT_DIR."""
+    return """<!DOCTYPE html>
 <HTML>
 <HEAD>
 <TITLE>{}</TITLE>
