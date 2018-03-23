@@ -23,8 +23,12 @@ STATIC_CONTENT_DIR = "/home/pi/pwm_server"
 # recommended to use GPIO pin 12 so you wouldn't need to open up things and re-plug cables if this change is made.
 # (Another good reason for pin 12 is that it is practical, it is next to GND pin 14.)
 PWM_PIN = 12
-# My fan doesn't like high PWM frequencies. 200Hz works very well.
+# My fan doesn't like high PWM frequencies. 200Hz works very well, and helps with low duty cycles. You may be able to
+# reduce noise by carefully choosing this value.
 PWM_FREQ = 200
+# Lowest allowed duty cycle (%), meaning the lowest duty cycle where the fan won't stall. This value will override any
+# nonzero duty cycle below it. Believe it or not, my fan still runs at 1% DC.
+PWM_MIN_DC = 1.0
 
 # PWM kickstart parameters. Kickstart always works at 100% duty cycle, only the duration of the 'kick' varies.
 # The time to kick when we start from zero. This must be enough to bring the fan above stall speed.
@@ -120,10 +124,12 @@ class GpioServer(object):
   def server_status(self):
     """This is the main page that will be returned upon every normal successful request.
     This should be be a simple page that can be used to control all basic functions of the server from a
-    smallish touch display."""
+    smallish touch display. TODO: create a UI that always stretches itself across small screens."""
     pwm_toggle = "<a href='/disable?manual=1'>Disable PWM</a>" if self.active else "<a href='/enable?manual=1'>Enable PWM</a>"
     manual_toggle = "<a href='/man_override?enable=0'>Disable manual override</a>" if self.override else "<a href='/man_override?enable=1'>Enable manual override</a>"
-    pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty) for duty in [0, 10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
+    # TODO: increment/decrement buttons next to presets, or replace presets with a slider
+    pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty)
+                   for duty in [0, 10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
     shutdown = "<br><a href='/shutdown'>Shutdown</a>"
     return GpioServer.html("PWM Server on {}".format(MACHINE_NAME),
       "PWM status: active = {}, duty cycle = <b>{:.2f}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
@@ -150,6 +156,8 @@ class GpioServer(object):
     if self.override and not manual:
       return self.needs_override()
 
+    if duty_value > 0 and duty_value < PWM_MIN_DC:
+      duty_value = PWM_MIN_DC
     self.duty = duty_value
     if self.active:
       self.pwm.setDuty(self.duty)
