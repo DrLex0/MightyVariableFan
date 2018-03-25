@@ -44,7 +44,8 @@ Coming soon!
 If you think this is awesome and you already want to get started collecting the required bits, make sure you have:
 * a recent Raspberry Pi (a 3B is certainly fine, not sure about the older ones),
 * a USB sound card (I used one of those ridiculously cheap ‘3D sound’ cards, they are crap but good enough for this),
+* a tiny microphone that can be mounted very close (within 10 mm) to the buzzer. I made mine from a standard electret capsule (about 9.7mm diameter, 6.7mm tall), a bit of shielded cable, and a 3.5mm plug. This can be mounted perfectly onto the buzzer with a 3D printed part I will publish shortly, and has an ideal signal strength at standard amplification levels;
 * a MOSFET break-out board (I bought a cheap IRF520 board on eBay),
 * some wires and plugs that fit the GPIO pins, try to find the shortest ones you can find because space is tight.
 
-You can also already print a [minimized case for the sound card](https://www.thingiverse.com/thing:2822474), which will be quite essential to make it fit inside the printer.
+You can also already print a [minimized case for the sound card](https://www.thingiverse.com/thing:2822474), which will be quite essential to make it fit inside the printer. Other models (for the Pi, MOSFET, and microphone) will be released soon.
