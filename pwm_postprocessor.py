@@ -31,13 +31,13 @@ from collections import deque
 # airflow.
 RAMP_UP_START = 12.0;
 
-# Z coordinate below which fan speeds will be linearly scaled with increasing Z.
+# Z coordinate (mm) below which fan speeds will be linearly scaled with increasing Z.
 # The correct value for this depends heavily on the design of your fan duct and extruder assembly.
 RAMP_UP_ZMAX = 12.0;
 
 # The number of seconds to shift the fan commands forwards. This will only be approximate, because
 # the time granularity depends on the length of print moves, and this script does not consider
-# acceleration to estimate the duration of print moves.
+# acceleration either to estimate the duration of print moves.
 LEAD_TIME = 1.0; # FIXME: NOT IMPLEMENTED!
 
 # The line indicating the end of the actual print commands. It is not strictly necessary to define
@@ -55,12 +55,13 @@ SIGNAL_FREQS = [5988, 6452, 6944, 7407]
 
 #### End of defaults section ####
 
-VERSION = '0.1';
 
+VERSION = '0.1';
 debug = False;
 
 class EndOfPrint(Exception):
     pass
+
 
 class GCodeStreamer(object):
   """Class for reading a GCode file without having to shove it entirely in memory, by only keeping
@@ -256,7 +257,7 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0):
     comment = "fan PWM {}{}{} = {:.2f}%".format(speed, scaled, clipped, s_speed / 2.55)
   else:
     comment = "fan off"
-  commands = ["M300 S0 P200; {} -> sequence {}".format(comment, "-".join([str(i) for i in sequence]))]
+  commands = ["M300 S0 P200; {} -> sequence {}".format(comment, "".join([str(i) for i in sequence]))]
   for i in xrange(len(sequence)):
     commands.append("M300 S{} P20".format(SIGNAL_FREQS[sequence[i]]))
     if i < len(sequence) - 1:
