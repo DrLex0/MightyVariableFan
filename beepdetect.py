@@ -21,7 +21,7 @@
 #   makes the system impervious against noises like pigs squealing exactly at the high signal frequencies, which
 #   obviously happens all the time while 3D printing.
 # This script only consumes between 5 and 6% of CPU on a Raspberry Pi 3, so you can use it for many other things at the
-#   same time.
+#   same time. However, it should be run at a low 'nice' value to ensure it gets priority over other processes.
 
 import pyaudio
 import sys

@@ -1,0 +1,22 @@
+#!/bin/bash
+# For manually stopping the server and detector in case you want to experiment.
+# Needs root privileges in case a service runs as root.
+
+function kill_it
+{
+	local pid=$1
+	local name=$2
+
+	if [ -n "$pid" ]; then
+		kill "$pid"
+	else
+		echo "No running ${name} found"
+	fi
+}
+
+pwm_pid=$(ps aux | grep -v grep | grep 'python .*pwm_server.py' | awk '{print $2}')
+beep_pid=$(ps aux | grep -v grep | grep 'python .*beepdetect.py' | awk '{print $2}')
+
+kill_it "$pwm_pid" "PWM server"
+kill_it "$beep_pid" "beep detector"
+
