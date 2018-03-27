@@ -17,7 +17,6 @@
 
 # TODO: implement LEAD_TIME! This will probably take at least as much effort as I have already put
 #       into this...
-# TODO: this should probably abort with an error if the file uses M126 and M127 in the main body.
 
 import argparse
 import re
@@ -26,19 +25,18 @@ from collections import deque
 
 #### Defaults, either pass custom values as command-line parameters, or edit these. ####
 
-# Maximum duty cycle (%) to use in the layer where the fan starts for the first time.
-# This should be low enough that your extruders do not cool down significantly due to the sudden
-# airflow.
-RAMP_UP_START = 12.0;
-
 # Z coordinate (mm) below which fan speeds will be linearly scaled with increasing Z.
 # The correct value for this depends heavily on the design of your fan duct and extruder assembly.
-RAMP_UP_ZMAX = 12.0;
+RAMP_UP_ZMAX = 10.0
+
+# The scale factor at Z=0. In other words, the linear scaling curve is a line between the points
+# (0.0, RAMP_UP_SCALE0) and (RAMP_UP_ZMAX, 1.0) on a (Z, scale) graph.
+RAMP_UP_SCALE0 = 0.1
 
 # The number of seconds to shift the fan commands forwards. This will only be approximate, because
 # the time granularity depends on the length of print moves, and this script does not consider
 # acceleration either to estimate the duration of print moves.
-LEAD_TIME = 1.0; # FIXME: NOT IMPLEMENTED!
+LEAD_TIME = 1.0  # FIXME: NOT IMPLEMENTED!
 
 # The line indicating the end of the actual print commands. It is not strictly necessary to define
 # this, but it will increase efficiency, ensure the fan is turned off without needing to
@@ -47,17 +45,22 @@ LEAD_TIME = 1.0; # FIXME: NOT IMPLEMENTED!
 END_MARKER = ";- - - Custom finish printing G-code for FlashForge Creator Pro - - -"
 
 # The frequencies of the signal beeps. These should match as closely as possible with SIG_BINS from
-# beepdetect.py. However, the buzzer cannot play any frequency, it only plays a limited set that
-# seems to follow the progression of semitones. I measured the following frequencies to be the
+# beepdetect.py. However, the buzzer cannot play any frequency, they are rounded to a limited set
+# that seems to follow the progression of semitones. I measured the following frequencies to be the
 # nearest ones to SIG_BINS = [139, 150, 161, 172] the buzzer actually plays.
 # (If you have no clue what I'm talking about here, the bottom line is: don't touch these values.)
+# FIXME: re-verify this, especially 6452 seems to end up more in bin 151 than 150, causing poor detections
 SIGNAL_FREQS = [5988, 6452, 6944, 7407]
+
+# Length of the beep sequences. This must match SEQUENCE_LENGTH in beepdetect.py, again you should
+# probably not touch this.
+SEQUENCE_LENGTH = 3
 
 #### End of defaults section ####
 
 
-VERSION = '0.1';
-debug = False;
+VERSION = '0.1'
+debug = False
 
 class EndOfPrint(Exception):
     pass
@@ -77,6 +80,7 @@ class GCodeStreamer(object):
     self.current_layer_z = None
     self.vase_mode_z = None
     self.current_target_speed = None
+    self.m126_7_found = False
 
   def start(self, replace_commands=None, replace_lines=None, replace_once=True):
     """Read the file and immediately output every line, until the end of the start G-code has been
@@ -145,18 +149,23 @@ class GCodeStreamer(object):
           if self.vase_mode_z >= self.current_layer_z + 0.2:
             self.current_layer_z = self.vase_mode_z
         else:
-         self.current_layer_z = float(layer_change.group(1))
-         self.vase_mode_z = None
-      else:
-        # M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
-        # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
-        fan_command = re.match(r"(M106|M107)(\s+S(\d*\.?\d+)|\s|;|$)", line)
-        if fan_command:
-          speed = 0.0
-          # An M106 without S argument will be treated as M106 S0 or M107.
-          if fan_command.group(1) == "M106" and fan_command.group(3):
-            speed = float(fan_command.group(3))
-          self.current_target_speed = speed
+          self.current_layer_z = float(layer_change.group(1))
+          self.vase_mode_z = None
+        return line
+
+      # M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
+      # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
+      fan_command = re.match(r"(M106|M107)(\s+S(\d*\.?\d+)|\s|;|$)", line)
+      if fan_command:
+        speed = 0.0
+        # An M106 without S argument will be treated as M106 S0 or M107.
+        if fan_command.group(1) == "M106" and fan_command.group(3):
+          speed = float(fan_command.group(3))
+        self.current_target_speed = speed
+        return line
+
+      if re.match(r"(M126|M127)(\s|;|$)", line):
+        self.m126_7_found = True
       return line
 
   def _get_next_ahead(self):
@@ -229,15 +238,23 @@ def print_debug(message):
 def print_error(message):
   print >> sys.stderr, "ERROR: {}".format(message)
 
+def print_warning(message):
+  print >> sys.stderr, "WARNING: {}".format(message)
+
+def speed_quantized(speed):
+  """Convert a speed in the 0-255 range to a quantized value that can be represented by a beep
+  sequence."""
+  return int(round(float(speed) / 255 * (4**SEQUENCE_LENGTH - 1)))
+
 def speed_to_beep_sequence(speed):
   """Return a list with the indices of the beep frequencies that represent the given speed."""
-  value = int(round(float(speed) / 255 * 63)) # TODO: replace 63 by calculation to allow sequences of any length
+  value = speed_quantized(speed)
   sequence = deque()
   while value:
     quad = value % 4
     sequence.appendleft(quad)
     value = (value - quad) / 4
-  while len(sequence) < 3:
+  while len(sequence) < SEQUENCE_LENGTH:
     sequence.appendleft(0)
   return list(sequence)
 
@@ -250,7 +267,7 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0):
   clipped = ""
   if s_speed > max_speed:
     s_speed = max_speed
-    clipped = ", clipped for start"
+    clipped = ", clipped"
   sequence = speed_to_beep_sequence(s_speed)
   if s_speed:
     scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
@@ -265,16 +282,19 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0):
   commands.append("M300 S0 P200; end sequence")
   return commands
 
+def ramp_up_scale(z):
+  return min(1.0, z * (1.0 - RAMP_UP_SCALE0) / RAMP_UP_ZMAX + RAMP_UP_SCALE0)
+
 
 parser = argparse.ArgumentParser(description='Post-processing script to convert M106 fan speed commands into beep sequences that can be detected by beepdetect.py, to obtain variable fan speed on 3D printers that lack a PWM fan output.')
 parser.add_argument('in_file', type=argparse.FileType('r'),
                     help='file to process')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='enable debug output on stderr')
-parser.add_argument('-s', '--start', type=float,
-                    help='Maximum duty cycle percentage for the layer in which the fan starts (default: {})'.format(RAMP_UP_START))
 parser.add_argument('-z', '--zmax', type=float,
                     help='Z coordinate below which fan speed will be linearly ramped up (default: {})'.format(RAMP_UP_ZMAX))
+parser.add_argument('-s', '--scale0', type=float,
+                    help='Scale factor for linear fan ramp-up curve at Z = 0 (default: {})'.format(RAMP_UP_SCALE0))
 parser.add_argument('-t', '--lead-time', type=float,
                     help='Number of seconds (approximately) to advance beep commands (default: {})'.format(LEAD_TIME))
 parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
@@ -300,14 +320,16 @@ except EOFError as err:
 
 print_debug("=== End of start G-code reached, now beginning actual processing ===")
 
-layers_with_fan_on = 0
-current_fan_speed = None  # Actual scaled speed
+last_z = 0
+layers_with_fan = 0
+# TODO: to minimize the amount of beeps to be played, should either store sequence or quantized speed.
+current_fan_speed = None  # Actual scaled and clipped speed
 while True:
   try:
     # look_ahead must be at least:
     #   2 to ignore Z-hop travel moves,
     #   1 to ignore duplicate M106 commands,
-    #   2 to notice the layer change fan speed has been set,
+    #   2 to already be aware of changed Z in case of fan command followed by layer change,
     #   3 to combine the previous two cases.
     # This is again Slic3r-specific, it inserts M106 before changing the layer.
     lines = gcode.get_next_event(3)
@@ -321,28 +343,34 @@ while True:
   print_debug("Interesting line: {}".format(lines[0]))
 
   if lines[0].startswith(("M106", "M107")):
-    gcode.pop()
+    gcode.pop()  # Get rid of this invalid Sailfish command
+
     # If there are multiple fan commands very close to each other, it is pointless to execute them
-    # all. Speed will be set to the last one found in the lookahead buffer, the rest is dropped.
+    # all. The last one seen in the lookahead buffer determines the speed, the rest is dropped.
     gcode.drop_ahead_commands(("M106", "M107"))
-    scale = min(1.0, gcode.current_layer_z / RAMP_UP_ZMAX)
-    print_debug("  Setting fan speed to {:.2f} scaled by {:.2f} due to fan command".format(
-                gcode.current_target_speed, scale))
-    max_speed = 2.55 * RAMP_UP_START if layers_with_fan_on <= 1 else 255.0
-    gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale, max_speed))
-    current_fan_speed = gcode.current_target_speed * scale
-  else:
+    scale = ramp_up_scale(gcode.current_layer_z)
+    new_fan_speed = gcode.current_target_speed * scale
+    if new_fan_speed != current_fan_speed:
+      print_debug("  Fan command -> setting fan speed to {:.2f} scaled by {:.2f} = {:.2f}".format(
+                  gcode.current_target_speed, scale, new_fan_speed))
+      gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale))
+      current_fan_speed = new_fan_speed
+    else:
+      print_debug("  Fan command skipped because already at required speed {}".format(current_fan_speed))
+
+  elif gcode.current_target_speed is not None:
     # Layer change: check if we need to update fan speed
-    if gcode.current_target_speed is not None:
-      layers_with_fan_on += 1
-      scale = min(1.0, gcode.current_layer_z / RAMP_UP_ZMAX)
-      new_fan_speed = gcode.current_target_speed * scale
-      if new_fan_speed != current_fan_speed:
-        print_debug("  Setting fan speed to {:.2f} scaled by {:.2f} due to layer change {}".format(
-                    gcode.current_target_speed, scale, gcode.current_layer_z))
-        gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale))
-        current_fan_speed = new_fan_speed
-      else:
-        print_debug("  No fan speed change needed at layer change {}".format(gcode.current_layer_z))
+    scale = ramp_up_scale(gcode.current_layer_z)
+    new_fan_speed = gcode.current_target_speed * scale
+    if new_fan_speed != current_fan_speed:
+      print_debug("  Layer change {} -> setting fan speed to {:.2f} scaled by {:.2f} = {:.2f}".format(
+                  gcode.current_layer_z, gcode.current_target_speed, scale, new_fan_speed))
+      gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale))
+      current_fan_speed = new_fan_speed
+    else:
+      print_debug("  Layer change {} needs no fan speed change".format(gcode.current_layer_z))
 
 gcode.stop()
+
+if gcode.m126_7_found:
+  print_warning("M126 and/or M127 command(s) were found inside the body of the G-code. Most likely, your fan will not work for this print. Are you sure your slicer is outputting G-code with M106 commands (e.g. RepRap G-code flavor)?")

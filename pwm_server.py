@@ -3,6 +3,9 @@
 # also offering a crude web interface to manually control the PWM.
 # The server can be switched to manual override mode, which requires every control
 # request to have a 'manual=1' argument.
+#
+# Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
+# Released under Creative Commons Attribution 4.0 International license.
 
 import cherrypy
 import os

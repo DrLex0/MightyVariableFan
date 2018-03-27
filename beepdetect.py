@@ -22,7 +22,11 @@
 #   obviously happens all the time while 3D printing.
 # This script only consumes between 5 and 6% of CPU on a Raspberry Pi 3, so you can use it for many other things at the
 #   same time. However, it should be run at a low 'nice' value to ensure it gets priority over other processes.
+#
+# Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
+# Released under Creative Commons Attribution 4.0 International license.
 
+import argparse
 import pyaudio
 import sys
 from collections import deque
@@ -33,7 +37,7 @@ from requests import ConnectionError
 from requests_futures.sessions import FuturesSession
 from time import sleep, time
 
-### Configuration section ###
+#### Defaults, either pass custom values as command-line parameters, or edit these. ####
 
 PWM_SERVER_IP = "127.0.0.1"
 PWM_SERVER_PORT = 8080
@@ -43,13 +47,18 @@ PWM_REQUEST_TIMEOUT = 4
 
 # This is tricky!!! Too low threshold will lead to false detections of the signal frequencies, down to the point where
 # even a slight echo of a real signal can cause problems. Obviously, too high threshold will lead to missed detections.
-# We'll need some way to calibrate this. I would play the 4 signal frequencies through the buzzer, while a simplified
-# script simply shows the FFT responses. You should then pick a sensitivity value that is slightly below the lowest FFT
-# intensity the script reports.
+# To help determining a good threshold, run this script in calibration mode (-c option). It will show intensities for
+# the signal frequencies if they exceed SENSITIVITY. If you play the BeepCalibration file on your printer, you should
+# see responses for all the frequencies, and there should always be at least one response that is well above this
+# SENSITIVITY value.
 SENSITIVITY = 10
 
-# Indices of the frequency bins that are used for signals. The frequency for bin i is i*SAMPLING_RATE/NUM_SAMPLES.
-SIG_BINS = [139, 150, 161, 172]
+# Enable debug output, useful when debugging this script. You should disable this under normal use, because the less
+# IO this program outputs, the less risk of something getting delayed.
+DEBUG = False
+
+
+### Configuration section for fixed values ###
 
 # Make sure this matches what your sound card can handle. Lower is actually better, because it means higher frequency
 # resolution for the same size of FFT.
@@ -60,13 +69,13 @@ SAMPLING_RATE = 44100
 # For 44.1k and 1024 samples, this is 23.2ms or 43.07 windows per second.
 NUM_SAMPLES = 1024
 
+# Indices of the frequency bins that are used for signals. The frequency for bin i is i*SAMPLING_RATE/NUM_SAMPLES.
+SIG_BINS = [139, 151, 161, 172]
+
 # Indices of the bins that may contain frequencies produced by the buzzer. Anything outside this will be ignored.
+# (Only used if DETECT_CONTINUOUS is enabled)
 TONE_BIN_LOWER = 3
 TONE_BIN_UPPER = 174
-
-# Enable debug output, useful when debugging this script. You should disable this under normal use, because the less
-# IO this program outputs, the less risk of something getting delayed.
-DEBUG = False
 
 # If True, explicitly reset detection state when detecting a loud continuous tone.
 # This is experimental and I do not recommend enabling it. The idea was to provide a barrier zone around the moment
@@ -76,13 +85,25 @@ DEBUG = False
 #   someone whistles, yells, or plays loud music near the printer.
 DETECT_CONTINUOUS = False
 
+# The number of beeps in a sequence. You probably shouldn't change this unless you plan to use this detector for
+# other things.
+SEQUENCE_LENGTH = 3
+
 ### End of configuration section ###
+
+pwm_server_ip = PWM_SERVER_IP
+pwm_server_port = PWM_SERVER_PORT
+pwm_request_timeout = PWM_REQUEST_TIMEOUT
+sensitivity = SENSITIVITY
+debug = DEBUG
 
 # To avoid having to do time system calls which may be expensive and return non-monotonic values, all timings rely on
 # the number of audio chunks processed, because the duration of one chunk is a known fixed time.
 chunk_duration = float(NUM_SAMPLES) / SAMPLING_RATE
-request_countdown = int(round(float(PWM_REQUEST_TIMEOUT + 1) / chunk_duration))
+request_countdown = int(round(float(pwm_request_timeout + 1) / chunk_duration))
 chunks_recorded = 0
+# Factor between decoded sequence value and duty cycle percentage
+seq_scale_factor = 100.0 / (4**SEQUENCE_LENGTH - 1)
 pa = pyaudio.PyAudio()
 
 
@@ -125,7 +146,7 @@ def start_detecting():
   # 3, ensure these bits of code are already cached when we need to do our first real request.
   attempts = 3
   while attempts:
-    future = session.get('http://{}:{}/enable'.format(PWM_SERVER_IP, PWM_SERVER_PORT))
+    future = session.get('http://{}:{}/enable'.format(pwm_server_ip, pwm_server_port))
     try:
       req = future.result()
       if req.status_code == 200:
@@ -196,11 +217,11 @@ def start_detecting():
       # Find the peak frequency. If the same one occurs loud enough for long enough, assume the buzzer is playing
       # a song and we should reset detection state.
       peak = intensity[TONE_BIN_LOWER:TONE_BIN_UPPER].argmax() + TONE_BIN_LOWER
-      if intensity[peak] > SENSITIVITY:
+      if intensity[peak] > sensitivity:
         if peak == last_peak:
           peak_count += 1
           if peak_count > 2:
-            if DEBUG: print "Reset because of continuous tone (bin {}, {}x)".format(peak, peak_count)
+            if debug: print "Reset because of continuous tone (bin {}, {}x)".format(peak, peak_count)
             detected = []
             last_sig_bins = empty_sig_bins[:]
             t_since_reset = 0
@@ -216,7 +237,7 @@ def start_detecting():
     # a more consistent intensity value even when a beep spans two windows.
     current_sig_bins = [intensity[SIG_BINS[i]] for i in sig_bin_indices]
     total_sig_bins = map(add, last_sig_bins, current_sig_bins)
-    signals = [i for i in sig_bin_indices if total_sig_bins[i] > SENSITIVITY]
+    signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
     last_sig_bins = current_sig_bins[:]
     if signals:
       if len(signals) > 1:
@@ -224,10 +245,10 @@ def start_detecting():
         # using an electrical connection instead of a microphone, a loud clap at the exact moment a beep is played,
         # will cause its detection to be missed. This seems lower risk than allowing any loud noise to appear to be
         # a valid signal.
-        if DEBUG: print "Ignoring multiple simultaneous signals"
-        continue;
+        if debug: print "Ignoring multiple simultaneous signals"
+        continue
       if t_since_reset < 8:  # should be at least 186ms
-        if DEBUG: print "Reset because signal {} too soon ({}) after last reset".format(signals[0], t_since_reset)
+        if debug: print "Reset because signal {} too soon ({}) after last reset".format(signals[0], t_since_reset)
         detected = []
         last_sig_bins = empty_sig_bins[:]
         t_since_reset = 0
@@ -237,16 +258,16 @@ def start_detecting():
         if t_since_last <= 2 and detected[-1][1] == signals[0]:
           # If thresholds would be perfectly tuned, we should only allow seeing the same frequency across 2 consecutive
           # windows. However, to avoid problems with too low thresholds, allow one extra window.
-          if DEBUG: print "Seen signal {} again, OK".format(signals[0])
+          if debug: print "Seen signal {} again, OK".format(signals[0])
           continue
         if t_since_last < 4 or t_since_last > 7:  # should be between 93ms and 163ms (allow reasonable delay on playback)
-          if DEBUG: print "Reset because signal {} too soon or late after previous signal {} ({})".format(signals[0], detected[-1][1], t_since_last)
+          if debug: print "Reset because signal {} too soon or late after previous signal {} ({})".format(signals[0], detected[-1][1], t_since_last)
           detected = []
           last_sig_bins = empty_sig_bins[:]
           t_since_reset = 0
           continue
-        if len(detected) > 2:
-          if DEBUG: print "Reset because of sequence with more than 3 signals"
+        if len(detected) > SEQUENCE_LENGTH - 1:
+          if debug: print "Reset because of sequence with more than {} signals".format(SEQUENCE_LENGTH)
           detected = []
           last_sig_bins = empty_sig_bins[:]
           t_since_reset = 0
@@ -256,28 +277,28 @@ def start_detecting():
     elif detected:
       # Nothing special happened. Check if our sequence is valid if we have one.
       t_since_last = t_since_reset - detected[-1][0]
-      if len(detected) == 3 and t_since_last >= 8:
+      if len(detected) == SEQUENCE_LENGTH and t_since_last >= 8:
         # It's party time!
         sequence = [sig[1] for sig in detected]
         value = seq_to_value(sequence)
-        duty = round(float(value) * 100.0 / 64, 2)
-        print "DETECTION: PWM {}%".format(duty)
-        if DEBUG: print "  {} -> {} = {}%".format("-".join([str(s) for s in sequence]), value, duty)
+        duty = round(float(value) * seq_scale_factor, 2)
+        seqstr = "".join([str(s) for s in sequence])
+        print "DETECTION: {} PWM {}%".format(seqstr, duty)
+        if debug: print "  sequence value: {}".format(value)
         sys.stdout.flush()  # If there's one thing we want to see immediately in logs, it's this.
         future_countdowns.append(request_countdown)
-        futures.append(session.get('http://{}:{}/setduty?d={}'.format(PWM_SERVER_IP, PWM_SERVER_PORT, duty),
-                                   timeout=PWM_REQUEST_TIMEOUT))
+        futures.append(session.get('http://{}:{}/setduty?d={}'.format(pwm_server_ip, pwm_server_port, duty),
+                                   timeout=pwm_request_timeout))
         detected = []
         t_since_reset = 0
-      elif len(detected) < 3 and t_since_last > 7:
-        if DEBUG: print "Reset because unfinished detection ({} signals)".format(len(detected))
+      elif len(detected) < SEQUENCE_LENGTH and t_since_last > 7:
+        if debug: print "Reset because unfinished detection ({} signals)".format(len(detected))
         detected = []
         t_since_reset = 0
         continue
 
 
 def calibration():
-  # This needs to be improved, must be able to pass sensitivity as CLI argument
   global chunks_recorded
   in_stream = open_input_stream()
 
@@ -285,7 +306,7 @@ def calibration():
   last_sig_bins = zeros(len(SIG_BINS))
 
   print "Calibration mode. Press CTRL-C to quit."
-  print "Intensities for the {} signal frequencies if any exceeds {}:".format(len(SIG_BINS), SENSITIVITY)
+  print "Intensities for the {} signal frequencies if any exceeds {}:".format(len(SIG_BINS), sensitivity)
 
   while True:
     while in_stream.get_read_available() < NUM_SAMPLES: sleep(0.01)
@@ -302,14 +323,35 @@ def calibration():
     intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
     current_sig_bins = [intensity[SIG_BINS[i]] for i in sig_bin_indices]
     total_sig_bins = map(add, last_sig_bins, current_sig_bins)
-    signals = [i for i in sig_bin_indices if total_sig_bins[i] > SENSITIVITY]
+    signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
     last_sig_bins = current_sig_bins[:]
     if signals:
       out = ["{:.3f}".format(total_sig_bins[i]) for i in sig_bin_indices]
       print "  ".join(out)
 
 
-if len(sys.argv) > 1 and sys.argv[1] == "-c":
+parser = argparse.ArgumentParser(description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.')
+parser.add_argument('-c', '--calibrate', action='store_true',
+                    help='Enable calibration mode')
+parser.add_argument('-d', '--debug', action='store_true',
+                    help='Enable debug output')
+parser.add_argument('-i', '--ip',
+                    help='IP of the PWM server (default: {})'.format(PWM_SERVER_IP))
+parser.add_argument('-p', '--port', type=int,
+                    help='Port of the PWM server (default: {})'.format(PWM_SERVER_PORT))
+parser.add_argument('-t', '--timeout', type=int,
+                    help='Timeout in seconds for requests to the PWM server (default: {})'.format(PWM_REQUEST_TIMEOUT))
+parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
+                    help='Sensitivity threshold for detecting signals (default: {})'.format(SENSITIVITY))
+
+args = parser.parse_args()
+
+if args.debug: debug = True
+if args.ip: pwm_server_ip = args.ip
+if args.port: pwm_server_port = args.port
+if args.timeout: pwm_request_timeout = args.timeout
+
+if args.calibrate:
   start_time = time()
   try:
     calibration()
