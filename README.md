@@ -17,7 +17,7 @@ I have looked for sensible ways to implement PWM for the fan, in such a way that
 
 1. A post-processing script takes G-code with fan speed commands (M106) as input, and outputs the same code with the commands replaced with M300 beep commands that play very specific sequences of 3 high-pitched blips using 4 specific frequencies. This allows to encode 64 levels, which is plenty for controlling a fan. This script also manipulates the speeds to optimize them (see advantages below).
 2. A Raspberry Pi runs a Python script called *beepdetect.py*, that continuously listens to audio input from a simple USB sound card. A microphone attached to this card, is placed directly above the printer's buzzer. The script uses an FFT to detect the specific frequencies of the blips.
-3. When beepdetect.py detects a sequence, it performs a HTTP call to a simple Python-based web server that also runs on the Pi, this is the *pwm\_server.py* script based on CherryPi.
+3. When beepdetect.py detects a sequence, it performs a HTTP call to a simple Python-based web server that also runs on the Pi, this is the *pwm\_server.py* script based on CherryPy.
 4. The pwm\_server reacts to incoming calls that request a speed change, by manipulating PWM output on a GPIO pin of the Pi, this is done through the RPi.GPIO Python module (it only implements software PWM, but this is good enough for controlling a fan at low frequency).
 5. The GPIO pin controls a simple MOSFET break-out board that is powered by the 24V of the main printer PSU. The fan is connected to this MOSFET's output.
 
