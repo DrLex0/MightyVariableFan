@@ -45,6 +45,7 @@ from time import sleep, time
 
 PWM_SERVER_IP = "127.0.0.1"
 PWM_SERVER_PORT = 8080
+
 # Maximum seconds for performing a request to the PWM server. Because these requests are offloaded
 # to a separate thread, this (plus 1 second) is also the time before the result will be checked
 # and errors will be reported.
@@ -59,10 +60,7 @@ PWM_REQUEST_TIMEOUT = 4
 # there should always be at least one response that is well above the sensitivity threshold.
 SENSITIVITY = 10
 
-# Enable debug output, useful when debugging this script. You should disable this under normal
-# use, because the less I/O this program outputs, the less risk of something getting delayed.
-DEBUG = False
-
+#### End of defaults section ####
 
 #### Configuration section for fixed values ####
 
@@ -101,35 +99,110 @@ SEQUENCE_LENGTH = 3
 #### End of configuration section ####
 
 
-pwm_server_ip = PWM_SERVER_IP
-pwm_server_port = PWM_SERVER_PORT
-pwm_request_timeout = PWM_REQUEST_TIMEOUT
-sensitivity = SENSITIVITY
-debug = DEBUG
+class DetectionState(object):
+  """Manages detected sequence state."""
+  def __init__(self, debug=False):
+    self.debug = debug
+    self.reset()
 
-# To avoid having to do time system calls which may be expensive and return non-monotonic values,
-# all timings rely on the number of audio chunks processed, because the duration of one chunk is a
-# known fixed time.
-chunk_duration = float(NUM_SAMPLES) / SAMPLING_RATE
-request_countdown = int(round(float(pwm_request_timeout + 1) / chunk_duration))
-chunks_recorded = 0
-# Factor between decoded sequence value and duty cycle percentage
-seq_scale_factor = 100.0 / (4**SEQUENCE_LENGTH - 1)
-pa = pyaudio.PyAudio()
+  def reset(self):
+    """A reset must be performed whenever we are certain the buzzer is playing a sound
+    that is not part of a sequence."""
+    # Factor between decoded sequence value and duty cycle percentage
+    self.seq_scale_factor = 100.0 / (4**SEQUENCE_LENGTH - 1)
+    # The number of chunks since the last reset is used as reference for sequence timings.
+    self.time_index = 0
+    self.detected = []
+    self.current_sig_start = None
+    self.last_sig_end = None
+
+  def time_increment(self):
+    """To be invoked when a new audio chunk has been analyzed, before using any of the
+    following methods."""
+    self.time_index += 1
+
+  def check_signal(self, signal_id):
+    """Update detection state when a signal was seen.
+    Returns True if this signal might be part of a sequence, False otherwise."""
+    if self.time_index < 8:  # should be at least 186ms
+      if self.debug:
+        print "Reset because signal {} too soon ({}) after last reset".format(
+              signal_id, self.time_index)
+      self.reset()
+      return False
+
+    if self.detected:
+      if self.current_sig_start and signal_id == self.detected[-1]:
+        signal_length = 1 + self.time_index - self.current_sig_start
+        # If thresholds would be perfectly tuned, we should only allow seeing the same frequency
+        # across 2 consecutive windows. However, thresholds are never perfect, and the printer
+        # sometimes stretches beeps when really busy, therefore allow 4 windows.
+        if signal_length > 4:
+          if self.debug:
+            print "Reset because signal {} too long ({}x)".format(signal_id, signal_length)
+          self.reset()
+          return False
+        if self.debug: print "Signal {} seen {}x, OK".format(signal_id, signal_length)
+        self.last_sig_end = self.time_index
+        return True
+      t_since_last = self.time_index - self.last_sig_end
+      if t_since_last < 3 or t_since_last > 7:
+        # Should be between 70ms and 163ms: consider overlap due to detecting across 2 successive
+        # windows, and allow reasonable stretch on playback of the silent part between beeps.
+        if self.debug:
+          print "Reset because signal {} too soon or late after previous signal {} ({})".format(
+                signal_id, self.detected[-1], t_since_last)
+        self.reset()
+        return False
+      if len(self.detected) > SEQUENCE_LENGTH - 1:
+        if self.debug:
+          print "Reset because of sequence with more than {} signals".format(SEQUENCE_LENGTH)
+        self.reset()
+        return False
+
+    self.detected.append(signal_id)
+    if self.current_sig_start is None:
+      self.current_sig_start = self.time_index
+    self.last_sig_end = self.time_index
+    return True
+
+  def check_silence(self):
+    """If detection state matches a valid sequence, return the duty cycle it represents
+    as a floating-point percentage, else return either None if nothing was detected,
+    or False if a partially detected sequence proved invalid."""
+    self.current_sig_start = None
+    if not self.detected:
+      return None
+
+    t_since_last = self.time_index - self.last_sig_end
+    if len(self.detected) == SEQUENCE_LENGTH and t_since_last >= 8:
+      # It's party time!
+      value = seq_to_value(self.detected)
+      duty = round(float(value) * self.seq_scale_factor, 2)
+      seqstr = "".join([str(s) for s in self.detected])
+      print "DETECTION: {} PWM {}%".format(seqstr, duty)
+      if self.debug: print "  sequence value: {}".format(value)
+      sys.stdout.flush()  # If there's one thing we want to see immediately in logs, it's this.
+      self.reset()
+      return duty
+    elif len(self.detected) < SEQUENCE_LENGTH and t_since_last > 8:
+      if self.debug:
+        print "Reset because incomplete detection ({} signals)".format(len(self.detected))
+      self.reset()
+      return False
+    return None
 
 
-def open_input_stream():
+def open_input_stream(audio):
   # All examples and most programs I find, set frames_per_buffer to the same size as the chunks to
   # be processed. However, I have encountered sporadic input buffer overflows when doing this. It
   # appears PyAudio has only one extra buffer to fill up while waiting for the first one to be
   # emptied, and sometimes this gives just too little time to do our work in between two reads.
   # So to get a larger margin, I simply request a buffer twice as big as my chunk size, which
   # seems to work fine.
-  return pa.open(format=pyaudio.paInt16,
-                 channels=1, rate=SAMPLING_RATE,
-                 input=True,
-                 frames_per_buffer=2 * NUM_SAMPLES)
-
+  return audio.open(format=pyaudio.paInt16,
+                    channels=1, rate=SAMPLING_RATE, input=True,
+                    frames_per_buffer=2 * NUM_SAMPLES)
 
 def seq_to_value(sequence):
   # Converts a sequence of base 4 numbers to an integer.
@@ -138,8 +211,19 @@ def seq_to_value(sequence):
     value += 4 ** i * sequence[-(i+1)]
   return value
 
+def start_detecting(audio, options):
+  debug = options.debug
+  server_ip = options.ip
+  server_port = options.port
+  request_timeout = options.timeout
+  sensitivity = options.sensitivity
 
-def start_detecting():
+  # To avoid having to do time system calls which may be expensive and return non-monotonic values,
+  # all timings rely on the number of audio chunks processed, because the duration of one chunk is a
+  # known fixed time.
+  chunk_duration = float(NUM_SAMPLES) / SAMPLING_RATE
+  request_countdown = int(round(float(options.timeout + 1) / chunk_duration))
+
   # HTTP requests to PWM server are done asynchronously. We really don't want to risk a buffer
   # overflow due to a slow response. Only when we're sure the request will be either done or has
   # timed out, check on it to print an error message if it failed.
@@ -150,15 +234,15 @@ def start_detecting():
 
   # This will probably barf many errors, you could clean up your asound.conf to get rid of some of
   # them, but they are harmless anyway.
-  in_stream = open_input_stream()
+  in_stream = open_input_stream(audio)
 
   # Perform a first request to the PWM server. This has three functions:
   # 1, warn early if the server isn't running;
   # 2, ensure the server is in enabled state;
   # 3, ensure these bits of code are already cached when we need to do our first real request.
   attempts = 3
-  while attempts:
-    future = session.get('http://{}:{}/enable'.format(pwm_server_ip, pwm_server_port))
+  while server_ip and attempts:
+    future = session.get('http://{}:{}/enable'.format(server_ip, server_port))
     try:
       req = future.result()
       if req.status_code == 200:
@@ -172,7 +256,7 @@ def start_detecting():
     print "Attempts left: {}".format(attempts)
     if attempts: sleep(2)
 
-  print("Beep sequence detector working. Press CTRL-C to quit.")
+  print "Beep sequence detector started."
   # TODO: make some basic logging handler so I don't need to call this all the time
   sys.stdout.flush()
 
@@ -180,11 +264,9 @@ def start_detecting():
   empty_sig_bins = zeros(len(SIG_BINS))
   last_sig_bins = empty_sig_bins[:]  # Ensure to copy by value, not reference
 
-  detected = []
+  detections = DetectionState(debug)
   last_peak = None
   peak_count = 0
-  # For beep timings, use the last reset moment as reference.
-  t_since_reset = 0
 
   while True:
     try:
@@ -196,7 +278,7 @@ def start_detecting():
       # error, and we don't want to hog the CPU with futile attempts to recover in such cases.
       print "ERROR while probing stream, retrying once to reopen stream: {}".format(err)
       sys.stdout.flush()
-      in_stream = open_input_stream()
+      in_stream = open_input_stream(audio)
       while in_stream.get_read_available() < NUM_SAMPLES: sleep(0.01)
 
     try:
@@ -211,7 +293,7 @@ def start_detecting():
     # values. Because our input is real (no imaginary component), we can ditch the redundant
     # second half of the FFT.
     intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
-    t_since_reset += 1
+    detections.time_increment()
 
     # Check any previously created requests to the PWM server.
     if future_countdowns:
@@ -237,9 +319,7 @@ def start_detecting():
           if peak_count > 2:
             if debug:
               print "Reset because of continuous tone (bin {}, {}x)".format(peak, peak_count)
-            detected = []
-            last_sig_bins = empty_sig_bins[:]
-            t_since_reset = 0
+            self.detections.reset()
             continue
         else:
           last_peak = peak
@@ -254,91 +334,48 @@ def start_detecting():
     total_sig_bins = map(add, last_sig_bins, current_sig_bins)
     signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
     last_sig_bins = current_sig_bins[:]
-    if signals:
-      if len(signals) > 1:
-        # If multiple occurred simultaneously, assume it is loud noise and ignore it. This means
-        # that unless you're using an electrical connection instead of a microphone, a loud clap
-        # at the exact moment a beep is played, may cause its detection to be missed. This seems
-        # lower risk than allowing any loud noise to appear to be a valid signal.
-        if debug: print "Ignoring multiple simultaneous signals"
-        continue
-      if t_since_reset < 8:  # should be at least 186ms
-        if debug:
-          print "Reset because signal {} too soon ({}) after last reset".format(
-                signals[0], t_since_reset)
-        detected = []
-        last_sig_bins = empty_sig_bins[:]
-        t_since_reset = 0
-        continue
-      if detected:
-        t_since_last = t_since_reset - detected[-1][0]
-        if t_since_last <= 3 and detected[-1][1] == signals[0]:
-          # If thresholds would be perfectly tuned, we should only allow seeing the same frequency
-          # across 2 consecutive windows. However, thresholds are never perfect, and the printer
-          # sometimes stretches beeps when really busy, therefore allow 4 windows.
-          if debug:
-            print "Seen signal {} again {}, OK".format(signals[0], t_since_last)
-          continue
-        if t_since_last < 4 or t_since_last > 8:
-          # Should be between 93ms and 186ms: allow reasonable delay on playback and cater for
-          # possible stretch on the beep itself.
-          if debug:
-            print "Reset because signal {} too soon or late after previous signal {} ({})".format(
-                  signals[0], detected[-1][1], t_since_last)
-          detected = []
-          last_sig_bins = empty_sig_bins[:]
-          t_since_reset = 0
-          continue
-        if len(detected) > SEQUENCE_LENGTH - 1:
-          if debug:
-            print "Reset because of sequence with more than {} signals".format(SEQUENCE_LENGTH)
-          detected = []
-          last_sig_bins = empty_sig_bins[:]
-          t_since_reset = 0
-          continue
-      detected.append([t_since_reset, signals[0]])
 
-    elif detected:
-      # Nothing special happened. Check if our sequence is valid if we have one.
-      t_since_last = t_since_reset - detected[-1][0]
-      if len(detected) == SEQUENCE_LENGTH and t_since_last >= 9:
-        # It's party time!
-        sequence = [sig[1] for sig in detected]
-        value = seq_to_value(sequence)
-        duty = round(float(value) * seq_scale_factor, 2)
-        seqstr = "".join([str(s) for s in sequence])
-        print "DETECTION: {} PWM {}%".format(seqstr, duty)
-        if debug: print "  sequence value: {}".format(value)
-        sys.stdout.flush()  # If there's one thing we want to see immediately in logs, it's this.
+    if len(signals) != 1:  # either 'silence' or multiple signals
+      # If multiple occurred simultaneously, assume it is loud noise and treat as silence. This
+      # means that unless you're using an electrical connection instead of a microphone, a loud
+      # clap at the exact moment a beep is played, may cause its detection to be missed. This
+      # seems lower risk than allowing any loud noise to appear to be a valid signal.
+      if len(signals) > 1:
+        if debug:
+          print "Ignoring {} simultaneous signals".format(len(signals))
+      # Check if we have a valid sequence
+      duty = detections.check_silence()
+      if duty is None:  # Nothing interesting happened
+        continue
+      last_sig_bins = empty_sig_bins[:]
+      if duty is not False and server_ip:
         future_countdowns.append(request_countdown)
         futures.append(
-          session.get('http://{}:{}/setduty?d={}'.format(pwm_server_ip, pwm_server_port, duty),
-                      timeout=pwm_request_timeout)
+          session.get('http://{}:{}/setduty?d={}'.format(server_ip, server_port, duty),
+                      timeout=request_timeout)
         )
-        detected = []
-        t_since_reset = 0
-      elif len(detected) < SEQUENCE_LENGTH and t_since_last > 8:
-        if debug: print "Reset because unfinished detection ({} signals)".format(len(detected))
-        detected = []
-        t_since_reset = 0
-        continue
+    else:  # 1 signal
+      if not detections.check_signal(signals[0]):
+        last_sig_bins = empty_sig_bins[:]
 
 
-def calibration():
+def calibration(audio, options):
   global chunks_recorded
-  in_stream = open_input_stream()
+  sensitivity = options.sensitivity
 
   sig_bin_indices = range(0, len(SIG_BINS))
   last_sig_bins = zeros(len(SIG_BINS))
 
   print "Calibration mode. Press CTRL-C to quit."
-  print "Intensities for the {} signal frequencies if any exceeds {}:".format(len(SIG_BINS),
-        sensitivity)
+  print "Intensities for the {} signal frequencies if any exceeds {}:".format(
+        len(SIG_BINS), sensitivity)
 
+  in_stream = open_input_stream(audio)
   while True:
     while in_stream.get_read_available() < NUM_SAMPLES: sleep(0.01)
     try:
-      audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True), dtype=short)
+      audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
+                              dtype=short)
       chunks_recorded += 1
     except IOError as err:
       print "ERROR while reading audio data: {}".format(err)
@@ -357,41 +394,42 @@ def calibration():
       print "  ".join(out)
 
 
-parser = argparse.ArgumentParser(
-  description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.')
-parser.add_argument('-c', '--calibrate', action='store_true',
-                    help='Enable calibration mode')
-parser.add_argument('-d', '--debug', action='store_true',
-                    help='Enable debug output')
-parser.add_argument('-i', '--ip',
-                    help='IP of the PWM server (default: {})'.format(PWM_SERVER_IP))
-parser.add_argument('-p', '--port', type=int,
-                    help='Port of the PWM server (default: {})'.format(PWM_SERVER_PORT))
-parser.add_argument('-t', '--timeout', type=int,
-                    help='Timeout in seconds for requests to the PWM server (default: {})'.format(
-                         PWM_REQUEST_TIMEOUT))
-parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
-                    help='Sensitivity threshold for detecting signals (default: {})'.format(
-                         SENSITIVITY))
+if __name__ == '__main__':
+  parser = argparse.ArgumentParser(
+    description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+  parser.add_argument('-c', '--calibrate', action='store_true',
+                      help='Enable calibration mode')
+  parser.add_argument('-d', '--debug', action='store_true',
+                      help='Enable debug output')
+  parser.add_argument('-i', '--ip',
+                      help='IP of the PWM server. Set to empty string to disable server requests.',
+                      default=PWM_SERVER_IP)
+  parser.add_argument('-p', '--port', type=int,
+                      help='Port of the PWM server',
+                      default= PWM_SERVER_PORT)
+  parser.add_argument('-t', '--timeout', type=int,
+                      help='Timeout in seconds for requests to the PWM server',
+                      default=PWM_REQUEST_TIMEOUT)
+  parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
+                      help='Sensitivity threshold for detecting signals',
+                      default=SENSITIVITY)
 
-args = parser.parse_args()
+  args = parser.parse_args()
 
-if args.debug: debug = True
-if args.ip: pwm_server_ip = args.ip
-if args.port: pwm_server_port = args.port
-if args.timeout: pwm_request_timeout = args.timeout
-
-if args.calibrate:
-  start_time = time()
-  try:
-    calibration()
-  except KeyboardInterrupt:
-    elapsed_time = time() - start_time
-    print "{} chunks in {} seconds = {:.3f}/s".format(
-          chunks_recorded,
-          elapsed_time,
-          chunks_recorded/elapsed_time)
-    print "If this is significantly lower than {:.3f}, you're in trouble.".format(
-          float(SAMPLING_RATE)/NUM_SAMPLES)
-else:
-  start_detecting()
+  audio = pyaudio.PyAudio()
+  if args.calibrate:
+    chunks_recorded = 0
+    start_time = time()
+    try:
+      calibration(audio, args)
+    except KeyboardInterrupt:
+      elapsed_time = time() - start_time
+      print "{} chunks in {} seconds = {:.3f}/s".format(
+            chunks_recorded,
+            elapsed_time,
+            chunks_recorded/elapsed_time)
+      print "If this is significantly lower than {:.3f}, you're in trouble.".format(
+            float(SAMPLING_RATE)/NUM_SAMPLES)
+  else:
+    start_detecting(audio, args)
