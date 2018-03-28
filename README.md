@@ -36,10 +36,10 @@ This approach, crazy as it may seem, has quite a few advantages:
 
 ### Disadvantages
 
-* There is only one obvious disadvantage: the printer will be making a bit of extra noises as if R2D2 is trying to subtly get your attention. These blips are very short though, and don't really stand out above the usual printer noises.
-* A less likely problem is that if your printer is placed next to a pen with pigs that can squeal extremely loud at the exact same frequencies as the blips, detection might fail. Please don't combine 3D printing with pigs. More realistic sources of disturbances are nearby machines that make loud hissing noises, or a loud music system very near to the printer.
+* There is only one obvious disadvantage: the printer will be making a bit of extra noises, as if R2D2 is trying to subtly get your attention. These blips are very short though, and are played at frequencies the buzzer cannot play loud anyway. Thanks to these two choices, the blips don't really stand out above the usual printer noises.
+* A less likely problem is that if your printer is placed next to a pen with pigs that can squeal *extremely* loud at the exact same frequencies as the blips, detection might fail. Please don't combine 3D printing with pigs. More realistic sources of disturbances are nearby machines that make loud hissing noises, or a loud music system very near to the printer. In my setup however, I couldn't even trigger any responses with the detector in debug mode without making unreasonably loud noises.
 
-Both these problems can be reduced or eliminated in several ways. The first way is to print a sealed adapter for attaching the microphone to the buzzer instead of a half-open one. This both attenuates the blips to a nearly inaudible level, and reduces influence of external noises.<br>
+If you would suffer from one or both of these problems, they can be reduced or eliminated in several ways. The first way is to print a sealed adapter for attaching the microphone to the buzzer instead of a half-open one. This both attenuates the blips to a nearly inaudible level, and reduces influence of external noises.<br>
 If you're not afraid of soldering on your printer's main board, you can omit the microphone and make a direct electrical connection between the buzzer contacts (marked ‘BUZZ BUZZ’) and the USB sound card. You should make the connection through a decoupling capacitor, and possibly add a resistor divider to attenuate the signal if necessary. This eliminates the outside noise problem completely. Moreover, you can unsolder the buzzer as well if you want to mute it entirely.
 
 
@@ -52,6 +52,6 @@ If you think this is awesome and you already want to get started collecting the 
 * a USB sound card (I used one of those ridiculously cheap ‘3D sound’ cards, they are crap but good enough for this),
 * a tiny microphone that can be mounted very close (within 10 mm) to the buzzer. I made mine from a standard electret capsule (about 9.7mm diameter, 6.7mm tall), a bit of shielded cable, and a 3.5mm plug. This can be mounted perfectly onto the buzzer with a 3D printed part I will publish shortly, and has an ideal signal strength at standard amplification levels;
 * a 24V MOSFET break-out board (I bought a cheap IRF520 board on eBay),
-* some wires and plugs that fit the GPIO pins, try to find the shortest ones you can find because space is tight.
+* some wires and header plugs that fit the GPIO pins; try to find low-profile or angled plugs because space is tight.
 
 You can also already print a [minimized case for the sound card](https://www.thingiverse.com/thing:2822474), which will be quite essential to make it fit inside the printer. Other models (for the Pi, MOSFET, and microphone adapter) will be released soon.
