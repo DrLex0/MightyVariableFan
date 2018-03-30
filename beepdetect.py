@@ -397,7 +397,8 @@ def calibration(audio, options):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(
     description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
-    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    argument_default=argparse.SUPPRESS)
   parser.add_argument('-c', '--calibrate', action='store_true',
                       help='Enable calibration mode')
   parser.add_argument('-d', '--debug', action='store_true',

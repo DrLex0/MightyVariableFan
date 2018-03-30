@@ -61,6 +61,8 @@ SEQUENCE_LENGTH = 3
 
 VERSION = '0.1'
 debug = False
+last_sequence = []
+
 
 class EndOfPrint(Exception):
     pass
@@ -258,17 +260,24 @@ def speed_to_beep_sequence(speed):
     sequence.appendleft(0)
   return list(sequence)
 
-def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0):
+def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
   """Return a list with the commands to play a sequence that can be detected by beepdetect.py.
-  @speed is a value between 0.0 and 255.0.
+  @speed is a float value between 0.0 and 255.0.
   @scale will be applied to @speed before generating the sequence.
-  Speed will be clipped to @max_speed."""
+  Speed will be clipped to @max_speed.i
+  If @skip_repeat, return empty list if the sequence is the same as in previous invocation."""
+  global last_sequence
+
   s_speed = speed * scale
   clipped = ""
   if s_speed > max_speed:
     s_speed = max_speed
     clipped = ", clipped"
   sequence = speed_to_beep_sequence(s_speed)
+  if sequence == last_sequence and skip_repeat:
+    return []
+  last_sequence = sequence
+
   if s_speed:
     scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
     comment = "fan PWM {}{}{} = {:.2f}%".format(speed, scaled, clipped, s_speed / 2.55)
@@ -285,18 +294,35 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0):
 def ramp_up_scale(z):
   return min(1.0, z * (1.0 - RAMP_UP_SCALE0) / RAMP_UP_ZMAX + RAMP_UP_SCALE0)
 
+def inject_beep_sequence(gcode, scale, lead_time=0.0):
+  """Insert the beep sequence that matches the most recent fan speed seen in gcode, scaled
+  by the given factor, back into the gcode. The position of the sequence will be chosen
+  such that it leads the original moment of the fan speed command by @lead_time seconds."""
+  commands = speed_to_M300_commands(gcode.current_target_speed, scale)
+  if commands:
+    # TODO: lead time: find appropriate previous line in buffer to insert this
+    gcode.append_buffer(commands)
+    return True
+  return False
 
-parser = argparse.ArgumentParser(description='Post-processing script to convert M106 fan speed commands into beep sequences that can be detected by beepdetect.py, to obtain variable fan speed on 3D printers that lack a PWM fan output.')
+
+parser = argparse.ArgumentParser(
+  description='Post-processing script to convert M106 fan speed commands into beep sequences that can be detected by beepdetect.py, to obtain variable fan speed on 3D printers that lack a PWM fan output.',
+  formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+  argument_default=argparse.SUPPRESS)
 parser.add_argument('in_file', type=argparse.FileType('r'),
                     help='file to process')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='enable debug output on stderr')
 parser.add_argument('-z', '--zmax', type=float,
-                    help='Z coordinate below which fan speed will be linearly ramped up (default: {})'.format(RAMP_UP_ZMAX))
+                    help='Z coordinate below which fan speed will be linearly ramped up',
+                    default=RAMP_UP_ZMAX)
 parser.add_argument('-s', '--scale0', type=float,
-                    help='Scale factor for linear fan ramp-up curve at Z = 0 (default: {})'.format(RAMP_UP_SCALE0))
-parser.add_argument('-t', '--lead-time', type=float,
-                    help='Number of seconds (approximately) to advance beep commands (default: {})'.format(LEAD_TIME))
+                    help='Scale factor for linear fan ramp-up curve at Z = 0',
+                    default=RAMP_UP_SCALE0)
+parser.add_argument('-t', '--lead_time', type=float,
+                    help='Number of seconds (approximately) to advance beep commands',
+                    default=LEAD_TIME)
 parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
                     help='optional file to write to (default is to print to standard output)')
 
@@ -322,7 +348,6 @@ print_debug("=== End of start G-code reached, now beginning actual processing ==
 
 last_z = 0
 layers_with_fan = 0
-# TODO: to minimize the amount of beeps to be played, should either store sequence or quantized speed.
 current_fan_speed = None  # Actual scaled and clipped speed
 while True:
   try:
@@ -338,37 +363,34 @@ while True:
     sys.exit(1)
   except EndOfPrint:
     if current_fan_speed:
-      gcode.append_buffer(speed_to_M300_commands(0))
+      gcode.append_buffer(speed_to_M300_commands(0.0))
     break
   print_debug("Interesting line: {}".format(lines[0]))
 
+  what = None
   if lines[0].startswith(("M106", "M107")):
     gcode.pop()  # Get rid of this invalid Sailfish command
+    what = "Fan command"
+  elif gcode.current_target_speed is not None:
+    # Layer change: check if we need to update fan speed
+    what = "Layer change {}".format(gcode.current_layer_z)
 
+  if what:
     # If there are multiple fan commands very close to each other, it is pointless to execute them
     # all. The last one seen in the lookahead buffer determines the speed, the rest is dropped.
     gcode.drop_ahead_commands(("M106", "M107"))
     scale = ramp_up_scale(gcode.current_layer_z)
     new_fan_speed = gcode.current_target_speed * scale
     if new_fan_speed != current_fan_speed:
-      print_debug("  Fan command -> setting fan speed to {:.2f} scaled by {:.2f} = {:.2f}".format(
-                  gcode.current_target_speed, scale, new_fan_speed))
-      gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale))
+      scaled = " scaled by {:.2f} = {:.2f}".format(scale, new_fan_speed) if scale < 1.0 else ""
+      print_debug("  {} -> set fan speed to {:.2f}{}".format(
+                  what, gcode.current_target_speed, scaled))
+      if not inject_beep_sequence(gcode, scale, args.lead_time):
+        print_debug("    but sequence is same as before, hence skip")
       current_fan_speed = new_fan_speed
     else:
-      print_debug("  Fan command skipped because already at required speed {}".format(current_fan_speed))
-
-  elif gcode.current_target_speed is not None:
-    # Layer change: check if we need to update fan speed
-    scale = ramp_up_scale(gcode.current_layer_z)
-    new_fan_speed = gcode.current_target_speed * scale
-    if new_fan_speed != current_fan_speed:
-      print_debug("  Layer change {} -> setting fan speed to {:.2f} scaled by {:.2f} = {:.2f}".format(
-                  gcode.current_layer_z, gcode.current_target_speed, scale, new_fan_speed))
-      gcode.append_buffer(speed_to_M300_commands(gcode.current_target_speed, scale))
-      current_fan_speed = new_fan_speed
-    else:
-      print_debug("  Layer change {} needs no fan speed change".format(gcode.current_layer_z))
+      print_debug("  {} -> already at required speed {}".format(
+                  what, current_fan_speed))
 
 gcode.stop()
 
