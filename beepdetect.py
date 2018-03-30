@@ -212,7 +212,7 @@ def seq_to_value(sequence):
   return value
 
 def start_detecting(audio, options):
-  debug = options.debug
+  debug = hasattr(options, 'debug')
   server_ip = options.ip
   server_port = options.port
   request_timeout = options.timeout
@@ -399,6 +399,7 @@ if __name__ == '__main__':
     description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     argument_default=argparse.SUPPRESS)
+  # SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
   parser.add_argument('-c', '--calibrate', action='store_true',
                       help='Enable calibration mode')
   parser.add_argument('-d', '--debug', action='store_true',
@@ -419,7 +420,7 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   audio = pyaudio.PyAudio()
-  if args.calibrate:
+  if hasattr(args, 'calibrate'):
     chunks_recorded = 0
     start_time = time()
     try:

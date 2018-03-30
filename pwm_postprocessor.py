@@ -310,6 +310,7 @@ parser = argparse.ArgumentParser(
   description='Post-processing script to convert M106 fan speed commands into beep sequences that can be detected by beepdetect.py, to obtain variable fan speed on 3D printers that lack a PWM fan output.',
   formatter_class=argparse.ArgumentDefaultsHelpFormatter,
   argument_default=argparse.SUPPRESS)
+# SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
 parser.add_argument('in_file', type=argparse.FileType('r'),
                     help='file to process')
 parser.add_argument('-d', '--debug', action='store_true',
@@ -328,13 +329,12 @@ parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
 
 args = parser.parse_args()
 
-if args.debug:
+if hasattr(args, 'debug'):
   debug = True
 
 print_debug("Debug output enabled, prepare to be spammed")
 
-output = sys.stdout if not args.out_file else args.out_file
-
+output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args.in_file, output)
 try:
   # Assumption: anything before the end of the start G-code will only contain 'fan off'
