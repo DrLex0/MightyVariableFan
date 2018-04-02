@@ -108,8 +108,8 @@ class GCodeStreamer(object):
     self.m126_7_found = False
 
   def start(self, replace_commands=None, replace_lines=None, replace_once=True):
-    """Read the file and immediately output every line, until the end of the start G-code has been
-    reached. We use the same '@body' marker as the GPX program to detect this line.
+    """Read the file and immediately output every line, until the end of the start G-code has
+    been reached. We use the same '@body' marker as the GPX program to detect this line.
     If @replace_commands is a string or tuple of strings, any lines starting with them, will be
     replaced with @replace_lines (must be a list), or removed if it is None.
     If @replace_once, only the first match will be replaced, the rest will be removed."""
@@ -279,8 +279,8 @@ class GCodeStreamer(object):
         return lines
 
   def pop(self, offset=0):
-    """Removes the last line from the buffer (i.e. the first one returned by the last invocation of
-    get_next_event), and returns it."""
+    """Removes the last line from the buffer (i.e. the first one returned by the last
+    invocation of get_next_event), and returns it."""
     self.buffer_times.pop()
     return self.buffer.pop()
 
@@ -307,8 +307,8 @@ class GCodeStreamer(object):
   def drop_ahead_commands(self, commands):
     """Remove lines starting with any of the given command(s) in the lookahead buffer.
     @commands may be a string or a tuple of strings."""
-    # It is simpler to just copy the non-deleted lines to a new deque, and if more than one line is
-    # to be deleted, it is more efficient as well.
+    # It is simpler to just copy the non-deleted lines to a new deque, and if more than one
+    # line is to be deleted, it is more efficient as well.
     cleaned = deque()
     cleaned_times = deque()
     for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
@@ -374,7 +374,8 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
     comment = "fan PWM {}{}{} = {:.2f}%".format(speed, scaled, clipped, s_speed / 2.55)
   else:
     comment = "fan off"
-  commands = ["M300 S0 P200; {} -> sequence {}".format(comment, "".join([str(i) for i in sequence]))]
+  commands = ["M300 S0 P200; {} -> sequence {}".format(
+              comment, "".join([str(i) for i in sequence]))]
   for i in xrange(len(sequence)):
     commands.append("M300 S{} P20".format(SIGNAL_FREQS[sequence[i]]))
     if i < len(sequence) - 1:
@@ -399,13 +400,21 @@ def inject_beep_sequence(gcode, scale, lead_time=0.0):
   if debug:
     assert(len(gcode.buffer) == len(gcode.buffer_times))
   position = len(gcode.buffer_times)
+  previous_sequence = False
   for t in reversed(gcode.buffer_times):
     position -= 1
     t_next = t_elapsed
     t_elapsed += t
     if t_elapsed >= lead_time:
       break
-  if position == 0:
+    elif gcode.buffer[position] == "M300 S0 P200; end sequence":
+      # Ensure not to jump across previously inserted sequence: swapping commands would be bad!
+      previous_sequence = True
+      break
+  if previous_sequence:
+    print_debug("  Cannot backtrack more than {:.3f}s due to previous sequence".format(t_next))
+    position += 1
+  elif position == 0:
     print_debug(
       "Buffer too short to backtrack to lead time of {:.3f}s, it will only be {:.3f}s".format(
       lead_time, t_elapsed))
@@ -420,7 +429,9 @@ def inject_beep_sequence(gcode, scale, lead_time=0.0):
         print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
       else:
         # TODO: we could split up the print move to get a good lead time! This must be optional
-        # though, because it could cause a hiccup that may be visible in the print.
+        # though, because it could cause a hiccup that may be visible in the print. This should
+        # also only really be done when speeding up the fan, because it is more crucial to have
+        # enough cooling in time.
         position += 1
         print_debug("    Picked {:.3f}: too short :(".format(t_next))
     else:
