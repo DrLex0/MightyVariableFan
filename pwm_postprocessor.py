@@ -3,10 +3,10 @@
 #   be detected by the beepdetect.py running on a Raspberry Pi.
 # It can also handle scaling of the PWM values depending on Z coordinate, to compensate for the
 #   effect of exhaust air 'bouncing' against the bed and causing more cooling than expected.
-# Because the M300 commands are timed pretty accurately (unlike the M126 and M127 which are usually
-#   executed way before their surrounding print commands are executed), the script will try to
+# Because M300 commands are timed pretty accurately (unlike M126 and M127 whose timing is sloppily
+#   anticipated based on the number of commands and not their duration), the script will try to
 #   shift them forward in time to compensate for the duration of the beep sequence and the time
-#   needed to spin up the fan. [UNIMPLEMENTED, TODO!!!]
+#   needed to spin up the fan.
 # This script assumes the fan commands are M106 (with an S argument) and M107. This will only be
 #   the case if you configure your slicer to output G-code for RepRap or another firmware that
 #   supports variable fan speed (I recommend to stick to RepRap because there are only minor
@@ -16,8 +16,7 @@
 # Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 # Released under Creative Commons Attribution 4.0 International license.
 
-# TODO: implement LEAD_TIME! This will probably take at least as much effort as I have already put
-#       into this...
+# TODO: implement splitting of long print moves to obtain accurate lead time.
 
 import argparse
 import itertools
