@@ -55,9 +55,9 @@ PWM_REQUEST_TIMEOUT = 4
 # false detections, down to the point where even a slight echo of a real signal can cause
 # problems. Obviously, too high threshold will lead to missed detections.
 # To help determining a good threshold, run this script in calibration mode (-c option). It will
-# show intensities for the signal frequencies if they exceed SENSITIVITY. If you play the
-# BeepCalibration file on your printer, you should see responses for all the frequencies, and
-# there should always be at least one response that is well above the sensitivity threshold.
+# show intensities for the signal frequencies if they exceed SENSITIVITY. If you 'print' a test
+# file on your printer that plays PWM sequences, you should see responses for all the frequencies,
+# and for every beep there must be at least one response that is well above the sensitivity threshold.
 SENSITIVITY = 10
 
 #### End of defaults section ####
@@ -360,38 +360,85 @@ def start_detecting(audio, options):
 
 
 def calibration(audio, options):
-  global chunks_recorded
   sensitivity = options.sensitivity
 
-  sig_bin_indices = range(0, len(SIG_BINS))
-  last_sig_bins = zeros(len(SIG_BINS))
+  sig_bins_groups = [[x-1, x, x+1] for x in SIG_BINS]
+  sig_bins_ext = [bin for group in sig_bins_groups for bin in group]  # flatten it
+  sig_bin_indices = range(0, len(sig_bins_ext))
+  last_sig_bins = zeros(len(sig_bins_ext))
+  global_sig_bins = last_sig_bins[:]
+  clipped = False
 
-  print "Calibration mode. Press CTRL-C to quit."
+  print "==== Calibration mode ===="
+  print """You should now 'print' a file that plays each of the 4 beep signals repeatedly
+  an equal number of times. Make sure the printer does not play any other sounds.
+Press CTRL-C when done.
+"""
   print "Intensities for the {} signal frequencies if any exceeds {}:".format(
         len(SIG_BINS), sensitivity)
 
   in_stream = open_input_stream(audio)
-  while True:
-    while in_stream.get_read_available() < NUM_SAMPLES: sleep(0.01)
+  chunks_recorded = 0
+  start_time = time()
+
+  try:
+    while True:
+      while in_stream.get_read_available() < NUM_SAMPLES: sleep(0.01)
+      try:
+        audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
+                                dtype=short)
+        chunks_recorded += 1
+      except IOError as err:
+        print "ERROR while reading audio data: {}".format(err)
+        continue
+
+      amax, amin = max(audio_data), min(audio_data)
+      if amin == -32768 or amax == 32767:
+        clipped = True
+        print "WARNING: clipping detected"
+
+      intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
+      current_sig_bins = [intensity[sig_bins_ext[i]] for i in sig_bin_indices]
+      total_sig_bins = map(add, last_sig_bins, current_sig_bins)
+      signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
+      last_sig_bins = current_sig_bins[:]
+      if signals:
+        # Only add to the statistics if there is any 'detected' signal, to avoid accumulating noise
+        global_sig_bins = map(add, global_sig_bins, current_sig_bins)
+        out = ["{:.3f}".format(total_sig_bins[i]) for i in sig_bin_indices if (i + 2) % 3 == 0]
+        print "  ".join(out)
+  except KeyboardInterrupt:
+    elapsed_time = time() - start_time
+    print "\nExiting calibration mode and generating statistics..."
+
+  print "{} chunks in {} seconds = {:.3f}/s".format(
+        chunks_recorded,
+        elapsed_time,
+        chunks_recorded/elapsed_time)
+  print "  If this is significantly lower than {:.3f}, you're in trouble.\n".format(
+        float(SAMPLING_RATE)/NUM_SAMPLES)
+
+  if clipped:
+    print "Warning: too loud signal has been detected. If only valid beep sequences were played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other sounds than the PWM sequences.)\n"
+
+  bins_vs_intensities = {global_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices if global_sig_bins[i] > 0}
+  sorted_bins = [value for key, value in sorted(bins_vs_intensities.iteritems(), reverse=True)]
+  print "Bins, including neighboring ones, sorted by average response intensity from high to low:"
+  print " > ".join(map(str, sorted_bins))
+  for group in sig_bins_groups:
     try:
-      audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
-                              dtype=short)
-      chunks_recorded += 1
-    except IOError as err:
-      print "ERROR while reading audio data: {}".format(err)
+      pivot = sorted_bins.index(group[1])
+    except ValueError:
+      print "Bin {} had no signals".format(group[1])
       continue
-
-    amax, amin = max(audio_data), min(audio_data)
-    if amin == -32768 or amax == 32767: print "WARNING: clipping detected"
-
-    intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
-    current_sig_bins = [intensity[SIG_BINS[i]] for i in sig_bin_indices]
-    total_sig_bins = map(add, last_sig_bins, current_sig_bins)
-    signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
-    last_sig_bins = current_sig_bins[:]
-    if signals:
-      out = ["{:.3f}".format(total_sig_bins[i]) for i in sig_bin_indices]
-      print "  ".join(out)
+    better = None
+    for i in [0, 2]:
+      if sorted_bins.index(group[i]) < pivot:
+        better = group[i]
+    if better:
+      print "Bin {} appears to be better than bin {}".format(better, group[1])
+    else:
+      print "Bin {} looks good".format(group[1])
 
 
 if __name__ == '__main__':
@@ -421,17 +468,6 @@ if __name__ == '__main__':
 
   audio = pyaudio.PyAudio()
   if hasattr(args, 'calibrate'):
-    chunks_recorded = 0
-    start_time = time()
-    try:
-      calibration(audio, args)
-    except KeyboardInterrupt:
-      elapsed_time = time() - start_time
-      print "{} chunks in {} seconds = {:.3f}/s".format(
-            chunks_recorded,
-            elapsed_time,
-            chunks_recorded/elapsed_time)
-      print "If this is significantly lower than {:.3f}, you're in trouble.".format(
-            float(SAMPLING_RATE)/NUM_SAMPLES)
+    calibration(audio, args)
   else:
     start_detecting(audio, args)

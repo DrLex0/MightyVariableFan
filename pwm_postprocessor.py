@@ -17,6 +17,9 @@
 # Released under Creative Commons Attribution 4.0 International license.
 
 # TODO: implement splitting of long print moves to obtain accurate lead time.
+# TODO: I would like to disable lead time for the very last command that turns off the fan right
+#       before the end G-code. Spiky things are often being printed at that moment, and we want
+#       to keep cooling them even while the extruder starts to retract.
 
 import argparse
 import itertools
@@ -55,16 +58,16 @@ FEED_LIMIT_Z = 1100.0
 # things where it shouldn't.
 END_MARKER = ";- - - Custom finish printing G-code for FlashForge Creator Pro - - -"
 
-# The frequencies of the signal beeps. These should match as closely as possible with SIG_BINS from
-# beepdetect.py. However, the buzzer cannot play any frequency, they are rounded to a limited set
-# that seems to follow the progression of semitones. I measured the following frequencies to be the
-# nearest ones to SIG_BINS = [139, 150, 161, 172] the buzzer actually plays.
+# The 4 frequencies of the signal beeps. These should match as closely as possible with SIG_BINS
+# from beepdetect.py. The buzzer cannot play any frequency, it is rounded to a limited set that
+# seems to follow the progression of semitones. I measured the following frequencies to be the
+# nearest ones to SIG_BINS = [139, 150, 161, 172] the buzzer actually plays, however in practice
+# bin 151 provides a stronger response than 150, maybe due to resonances of the buzzer.
 # (If you have no clue what I'm talking about here, the bottom line is: don't touch these values.)
-# FIXME: re-verify this, especially 6452 seems to end up more in bin 151 than 150, causing poor detections
 SIGNAL_FREQS = [5988, 6452, 6944, 7407]
 
 # Length of the beep sequences. This must match SEQUENCE_LENGTH in beepdetect.py, again you should
-# probably not touch this.
+# probably not touch this unless you want to use this script for something else.
 SEQUENCE_LENGTH = 3
 
 #### End of defaults section ####
@@ -85,6 +88,8 @@ class GCodeStreamer(object):
   the oldest line(s) will be popped from the buffer and sent to output."""
 
   def __init__(self, in_file, output, feed_factor, feed_limit_z, max_buffer=64):
+    """@max_buffer is the largest number of lines that will be kept in memory before sending
+    the oldest ones to output while reading new lines."""
     self.in_file = in_file
     self.output = output
     self.feed_factor = feed_factor
