@@ -117,7 +117,8 @@ Before mounting everything, it is a good idea to do a sanity check of the whole 
 
 If you haven't yet mounted a Raspberry Pi in your printer, and you do not want to optimize its position for attaching the RPi camera with its rather short flatcable, I recommend to mount it in the front side of the bottom chamber next to the power supply, as shown in the overview image. This position ensures the WiFi antenna will have good signal reception and not be near any other circuit of the printer, moreover it offers easy routing of the microphone, MOSFET and USB power cables. Of course, feel free to mount the Pi anywhere else, but as always you're on your own then.
 
-![Overview](images/overview.jpg | width=640)
+![Overview](images/overview_small.jpg)<br>
+[Overview (view larger image)](images/overview.jpg)
 
 If you are using the 3D printed mount, you can stick it to the printer's housing with epoxy glue. You should first make sure there is enough room for cables and plugs, before fixing the position of the mount. By all means you should glue the mount with the Pi inside it and the sound card plugged into the Pi, otherwise there is no guarantee it will fit. This is also why you shouldn't use cyanoacrylate (super glue): it won't give you time to correct the position if you got it wrong.
 
