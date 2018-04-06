@@ -42,7 +42,7 @@ RAMP_UP_SCALE0 = 0.1
 # play and decode the sequence, and spin up the fan. This will only be approximate, because time
 # granularity depends on duration of print moves, moreover this script does not consider
 # acceleration when estimating the duration of moves.
-LEAD_TIME = 1.0
+LEAD_TIME = 1.2
 
 # Multiplier between speed in mm/s and feedrate numbers for your printer. For the FFCP this should
 # be 60, and be the same for both X, Y, Z, and even E.
@@ -51,6 +51,10 @@ FEED_FACTOR = 60.0
 # Even though the Z axis has the same feed factor as the X and Y axes, its top speed is much
 # lower. On the FFCP the maximum Z feedrate is about 1100.
 FEED_LIMIT_Z = 1100.0
+
+#### End of defaults section ####
+
+#### Configuration section for fixed values ####
 
 # The line indicating the end of the actual print commands. It is not strictly necessary to define
 # this, but it will increase efficiency, ensure the fan is turned off without needing to
@@ -70,7 +74,7 @@ SIGNAL_FREQS = [5988, 6452, 6944, 7407]
 # probably not touch this unless you want to use this script for something else.
 SEQUENCE_LENGTH = 3
 
-#### End of defaults section ####
+#### End of configuration section ####
 
 
 VERSION = '0.1'
