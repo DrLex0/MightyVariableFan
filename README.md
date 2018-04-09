@@ -141,6 +141,8 @@ If you are using my 3D printed mount, you can stick it to the printer's housing 
 
 How you can mount the 5V power supply, will depend on its shape. In the overview photo you can see that my supply was small enough to simply tuck under a bundle of wires. I connected it to the mains voltage terminals of the main supply through part of an extension cable. This ensured a safe connection, as opposed to my first stupid idea of trying to wrap something around the plugs and covering them with shrink-wrap tubing, which I quickly abandoned when trying it in practice. If your idea seems vaguely dangerous, it most likely is and must not be attempted. In case of doubt, either ask assistance from someone more experienced with electronics, or keep the power supply outside your printer and plug it into a regular power socket.
 
+Installing the microphone is straightforward: push it into the mount, and the mount onto the buzzer. Insert the 3.5 mm plug into the input jack of the sound card (yellow on ‘3D sound’). Ensure the plug is perfectly clean to avoid getting random bad contacts. Try to avoid that the microphone cable touches the motherboard fan (unless you disabled this because apparently it is not really necessary).
+
 Now you can mount the MOSFET. Before fixing its mount in place, connect all the wires. Disconnect the fan wires from the EXTRA output socket, and connect them to the V+ (red) and V- (black) terminals of the board. Next, you need to get 24V from somewhere. You can either use a long wire directly to one of the unused 24V terminals of the power supply, or you can use a short wire to the ‘FAN’ output on the corner of the board, which is hard-wired to the 24V as well. Make sure to get the polarity right! GND is negative (usually black wire), VIN is positive (usually red wire). Don't forget to connect the GPIO as described at the start of this section. Once everything is connected, find a good place to glue the mount.
 
 
@@ -183,6 +185,10 @@ Once the script has been configured, you can either manually run it on every G-c
 **Note:** even though you should reconfigure your slicer to output RepRap-flavor G-code, the GPX program to convert G-code into X3G must still be configured to output code for the FlashForge Creator Pro (`-m fcp` option)!
 
 During a print you can observe the current PWM duty cycle, and manipulate it if you wish, by opening the PWM server interface on a computer, tablet or smartphone. The default address is `http://your.RPi.address:8080/`. The interface is currently still very crude but should be self-explanatory. It also allows to *shut down the Pi cleanly.* This is not terribly important, but recommended if the Pi's power supply is behind the same switch as the printer's. It is better to perform a clean shutdown than simply pulling the power. Wait at least 10 seconds for the Pi to shut down before disconnecting the mains.
+
+In the Tools folder, there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that play the sequences for disabling the fan and setting it to 100%. These are useful for several things:
+* in case you had to abort a print, and don't have direct access to the PWM web interface to stop the fan.
+* as a quick routine test of the fan system after booting up your printer. This is especially recommended if you're about to do a print where correct cooling is crucial. So far I've had one occasion where the microphone didn't pick up any sound after I had taken the system apart and reassembled it (most likely a bad contact with the 3.5 mm plug, it was fixed after I had cleaned the plug and reinserted it).
 
 Last but not least, if you previously neglected fan speed values in your slicer profiles (as you should have), now is the time to go through them again and try to enter sensible values. Optimal values will differ between each filament, and also depend on what kind of extruder, nozzle, and cooling duct you are using. Be prepared to experiment and tweak!
 
