@@ -17,9 +17,6 @@
 # Released under Creative Commons Attribution 4.0 International license.
 
 # TODO: implement splitting of long print moves to obtain accurate lead time.
-# TODO: I would like to disable lead time for the very last command that turns off the fan right
-#       before the end G-code. Spiky things are often being printed at that moment, and we want
-#       to keep cooling them even while the extruder starts to retract.
 
 import argparse
 import itertools
@@ -42,7 +39,7 @@ RAMP_UP_SCALE0 = 0.1
 # play and decode the sequence, and spin up the fan. This will only be approximate, because time
 # granularity depends on duration of print moves, moreover this script does not consider
 # acceleration when estimating the duration of moves.
-LEAD_TIME = 1.2
+LEAD_TIME = 1.5
 
 # Multiplier between speed in mm/s and feedrate numbers for your printer. For the FFCP this should
 # be 60, and be the same for both X, Y, Z, and even E.
@@ -213,22 +210,17 @@ class GCodeStreamer(object):
           print >> self.output, self.buffer.popleft()
           self.buffer_times.popleft()
 
+      times = self.buffer_ahead_times if ahead else self.buffer_times
       if line.startswith(END_MARKER):
         self.end_of_print = True
+        times.append(0.0)
         raise EndOfPrint("End of print code reached")
 
       if re.match(r"[^;]*G1(\s|;|$)", line):  # print or travel move
-        time_estimate = self._update_print_state(line)
-        if ahead:
-          self.buffer_ahead_times.append(time_estimate)
-        else:
-          self.buffer_times.append(time_estimate)
+        times.append(self._update_print_state(line))
         return line
 
-      if ahead:
-        self.buffer_ahead_times.append(0.0)
-      else:
-        self.buffer_times.append(0.0)
+      times.append(0.0)
       # TODO: a G4 command can be directly converted to time (but should be rare in actual prints)
       # TODO: tool changes (should be assumed to take ridiculously long)
 
@@ -515,6 +507,7 @@ while True:
     sys.exit(1)
   except EndOfPrint:
     if current_fan_speed:
+      print_debug("End of print reached while fan still active: inserting off sequence")
       gcode.append_buffer(speed_to_M300_commands(0.0))
     break
   print_debug("Interesting line: {}".format(lines[0]))
@@ -537,7 +530,10 @@ while True:
       scaled = " scaled by {:.2f} = {:.2f}".format(scale, new_fan_speed) if scale < 1.0 else ""
       print_debug("  {} -> set fan speed to {:.2f}{}".format(
                   what, gcode.current_target_speed, scaled))
-      if not inject_beep_sequence(gcode, scale, args.lead_time):
+      # Do not move the final M107 forward, to maximize cooling of spiky things. Again rely
+      # on look_ahead (will fail if there is filament-specific end code).
+      lead = 0.0 if gcode.end_of_print and not new_fan_speed else args.lead_time
+      if not inject_beep_sequence(gcode, scale, lead):
         print_debug("    but sequence is same as before, hence skip")
       current_fan_speed = new_fan_speed
     else:
