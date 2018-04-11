@@ -52,6 +52,13 @@ MACHINE_NAME = "Raspberry Pi"
 
 #### End of defaults section ####
 
+#### Configuration section for fixed values ####
+
+# Path to the lock file of beepdetect.py, will be used to show a warning if it isn't running.
+DETECTOR_LOCK_FILE = "/run/lock/beepdetect.lock"
+
+#### End of configuration section ####
+
 
 class PWMController(object):
   """Allows to control a GPIO pin on the Raspberry Pi with PWM output, with support for 'kickstarting' the output
@@ -147,12 +154,17 @@ class GpioServer(object):
       time.sleep(.5)
       sys.exit(0)
 
-  def server_status(self):
+  def server_status(self, basic=None):
     """This is the main page that will be returned upon every normal successful request.
+    If @basic evaluates to True, any extras will be disabled and the response will be minimal.
     This should be be a simple page that can be used to control all basic functions of the server
     from a smallish touch display.
     TODO: create a much nicer UI that always stretches itself across small screens."""
     active = "True" if self.active else "<span class='warn'>False</span>"
+    if basic:
+      return GpioServer.html("PWM Server",
+        "PWM status: active = {}, duty cycle = <b>{:.2f}</b>".format(active, self.duty))
+
     if self.active:
       pwm_toggle = "<a href='/disable?manual=1'>Disable PWM</a>"
     else:
@@ -164,6 +176,10 @@ class GpioServer(object):
     else:
       manual_toggle = "<a href='/man_override?enable=1'>Enable manual override</a>"
 
+    detector_warning = ""
+    if not os.path.exists(DETECTOR_LOCK_FILE):
+      detector_warning = "<br><span class='warn'>Warning: beepdetect is not running!</span>"
+
     # TODO: increment/decrement buttons next to presets, or replace presets with a slider
     # Also useful: scale factor for incoming requests
     pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty)
@@ -171,20 +187,20 @@ class GpioServer(object):
     shutdown = "<br><a href='/'>Refresh</a>&nbsp; <a href='/shutdown'>Shutdown</a>"
 
     return GpioServer.html("PWM Server on {}".format(self.machine_name),
-      "PWM status: active = {}, duty cycle = <b>{:.2f}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}".format(
+      "PWM status: active = {}, duty cycle = <b>{:.2f}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}{}".format(
         active, self.duty, override, pwm_toggle, manual_toggle, " ".join(pwm_presets),
-        shutdown))
+        detector_warning, shutdown))
 
   def needs_override(self):
     return GpioServer.html("Manual override in effect",
       "Ignoring this request because the server is in manual override mode, and the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
   @cherrypy.expose
-  def index(self):
-    return self.server_status()
+  def index(self, basic=None):
+    return self.server_status(basic)
 
   @cherrypy.expose
-  def setduty(self, d, manual=None):
+  def setduty(self, d, manual=None, basic=None):
     """@d must be a number between 0.0 and 100.0, where 0 is off and 100 is full power."""
     try:
       duty_value = float(d)
@@ -205,25 +221,25 @@ class GpioServer(object):
     self.duty = duty_value
     if self.active:
       self.pwm.setDuty(self.duty)
-    return self.server_status()
+    return self.server_status(basic)
 
   @cherrypy.expose
-  def enable(self, manual=None):
+  def enable(self, manual=None, basic=None):
     if self.override and not manual:
       return self.needs_override()
     if not self.active:
       self.pwm.setDuty(self.duty)
     self.active = True
-    return self.server_status()
+    return self.server_status(basic)
 
   @cherrypy.expose
-  def disable(self, manual=None):
+  def disable(self, manual=None, basic=None):
     if self.override and not manual:
       return self.needs_override()
     if self.active:
       self.pwm.setDuty(0)
     self.active = False
-    return self.server_status()
+    return self.server_status(basic)
 
   @cherrypy.expose
   def man_override(self, enable):

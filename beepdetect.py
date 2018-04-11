@@ -31,6 +31,7 @@
 # Released under Creative Commons Attribution 4.0 International license.
 
 import argparse
+import os
 import pyaudio
 import sys
 from collections import deque
@@ -95,6 +96,10 @@ DETECT_CONTINUOUS = False
 # The number of beeps in a sequence. You probably shouldn't change this unless you plan to use
 # this detector for other things.
 SEQUENCE_LENGTH = 3
+
+# Path to a file that signals whether an instance of this script is active. The location must be
+# writable. The PID of the running instance will be written to the file.
+LOCK_FILE = "/run/lock/beepdetect.lock"
 
 #### End of configuration section ####
 
@@ -242,7 +247,7 @@ def start_detecting(audio, options):
   # 3, ensure these bits of code are already cached when we need to do our first real request.
   attempts = 3
   while server_ip and attempts:
-    future = session.get('http://{}:{}/enable'.format(server_ip, server_port))
+    future = session.get('http://{}:{}/enable?basic=1'.format(server_ip, server_port))
     try:
       req = future.result()
       if req.status_code == 200:
@@ -351,7 +356,7 @@ def start_detecting(audio, options):
       if duty is not False and server_ip:
         future_countdowns.append(request_countdown)
         futures.append(
-          session.get('http://{}:{}/setduty?d={}'.format(server_ip, server_port, duty),
+          session.get('http://{}:{}/setduty?d={}&basic=1'.format(server_ip, server_port, duty),
                       timeout=request_timeout)
         )
     else:  # 1 signal
@@ -441,6 +446,32 @@ Press CTRL-C when done.
       print "Bin {} looks good".format(group[1])
 
 
+def clean_exit():
+  print "Exiting..."
+  if os.path.isfile(LOCK_FILE):
+    os.unlink(LOCK_FILE)
+
+def terminated(num, frame):
+  print "Caught signal {}".format(num)
+  sys.exit(0)  # This will trigger clean_exit through atexit.
+
+def create_lock_file():
+  if os.access(os.path.dirname(LOCK_FILE), os.W_OK):
+    # Prevent two instances from trying to run at the same time, also useful to allow
+    # pwm_server.py to show a warning if this daemon is not active.
+    if os.path.isfile(LOCK_FILE):
+      print >> sys.stderr, "ERROR: another instance is already running, or has exited without cleaning up its lock file at {}".format(LOCK_FILE)
+      sys.exit(1)
+    with open(LOCK_FILE, "w") as file_handle:
+      file_handle.write(str(os.getpid()))
+  else:
+    # Do not make this a fatal error to facilitate testing on other platforms.
+    print "Not creating a lockfile at {} because the directory is not writable or does not exist.".format(LOCK_FILE)
+  import atexit, signal
+  atexit.register(clean_exit)
+  signal.signal(signal.SIGTERM, terminated)
+
+
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(
     description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
@@ -466,6 +497,7 @@ if __name__ == '__main__':
 
   args = parser.parse_args()
 
+  create_lock_file()
   audio = pyaudio.PyAudio()
   if hasattr(args, 'calibrate'):
     calibration(audio, args)
