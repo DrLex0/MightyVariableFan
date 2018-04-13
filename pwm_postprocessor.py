@@ -16,7 +16,11 @@
 # Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 # Released under Creative Commons Attribution 4.0 International license.
 
-# TODO: implement splitting of long print moves to obtain accurate lead time.
+# TODO: prevent look_ahead from skipping fan speed changes for single-line bridge moves!
+# TODO: if there are too many successive fan speed commands in too short time, then some should be
+#   skipped in a smart manner. For instance, trying to reduce speed during only a second or less,
+#   is pointless due to inertia of the fan. (The last command in a 'burst' must always remain
+#   intact.)
 
 import argparse
 import itertools
@@ -35,11 +39,12 @@ RAMP_UP_ZMAX = 9.0
 # (0.0, RAMP_UP_SCALE0) and (RAMP_UP_ZMAX, 1.0) on a (Z, scale) graph.
 RAMP_UP_SCALE0 = 0.1
 
-# The number of seconds to shift the fan commands forwards, to compensate for the time needed to
+# The number of seconds to shift fan commands forward in time, to compensate for time needed to
 # play and decode the sequence, and spin up the fan. This will only be approximate, because time
 # granularity depends on duration of print moves, moreover this script does not consider
-# acceleration when estimating the duration of moves.
-LEAD_TIME = 1.5
+# acceleration when estimating the duration of moves. Acceleration will make actual time slightly
+# longer than what you configure here.
+LEAD_TIME = 1.3
 
 # Multiplier between speed in mm/s and feedrate numbers for your printer. For the FFCP this should
 # be 60, and be the same for both X, Y, Z, and even E.
@@ -117,8 +122,9 @@ class GCodeStreamer(object):
     been reached. We use the same '@body' marker as the GPX program to detect this line.
     If @replace_commands is a string or tuple of strings, any lines starting with them, will be
     replaced with @replace_lines (must be a list), or removed if it is None.
-    If @replace_once, only the first match will be replaced, the rest will be removed."""
-    replaced = False
+    If @replace_once, only the first match will be replaced, the rest will be removed.
+    Return value is the number of lines replaced or removed."""
+    replaced = 0
     while True:
       line = self.in_file.readline()
       if not line:
@@ -126,11 +132,12 @@ class GCodeStreamer(object):
       if replace_commands and line.startswith(replace_commands):
         if replace_lines and (not replace_once or not replaced):
           print >> self.output, "\n".join(replace_lines)
-          replaced = True
+        replaced += 1
       else:
         print >> self.output, line.rstrip("\r\n")
       if re.search(r";\s*@body(\s+|$)", line):
         break
+    return replaced
 
   def stop(self):
     """Output the rest of the buffers, and the rest of the file."""
@@ -289,20 +296,110 @@ class GCodeStreamer(object):
     self.buffer.extend(lines)
     self.buffer_times.extend([0.0 for _ in range(len(lines))])
 
-  def insert_buffer(self, pos, lines):
-    """Insert extra @lines before the existing line at index @pos."""
+  def insert_buffer(self, pos, lines, replace=False):
+    """Insert extra @lines before, or replace the existing line at index @pos."""
     # This would probably be a one-liner (per buffer) in python 3.6
     new_buffer = deque()
     new_buffer_times = deque()
     for _ in range(pos):
       new_buffer.append(self.buffer.popleft())
       new_buffer_times.append(self.buffer_times.popleft())
+    if replace:
+      self.buffer.popleft()
+      self.buffer_times.popleft()
     new_buffer.extend(lines)
     new_buffer_times.extend([0.0 for _ in range(len(lines))])
     new_buffer.extend(self.buffer)
     new_buffer_times.extend(self.buffer_times)
     self.buffer = new_buffer
     self.buffer_times = new_buffer_times
+
+  @staticmethod
+  def parse_xy(line):
+    """Return X, Y components of a G1 command as a tuple. Absent components will be None."""
+    found_x = re.match(r"[^;]*X(-?\d*\.?\d+)(\s|;|$)", line)
+    found_y = re.match(r"[^;]*Y(-?\d*\.?\d+)(\s|;|$)", line)
+    x, y = None, None
+    if found_x: x = float(found_x.group(1))
+    if found_y: y = float(found_y.group(1))
+    return x, y
+
+  @staticmethod
+  def parse_xyzefc(line):
+    """Return X, Y, Z, E, F components and comment string of a command line as an array.
+    Absent components will be None, or empty string for the comment."""
+    found_x = re.match(r"[^;]*X(-?\d*\.?\d+)(\s|;|$)", line)
+    found_y = re.match(r"[^;]*Y(-?\d*\.?\d+)(\s|;|$)", line)
+    found_z = re.match(r"[^;]*Z(\d*\.?\d+)(\s|;|$)", line)
+    found_e = re.match(r"[^;]*E(-?\d*\.?\d+)(\s|;|$)", line)
+    found_f = re.match(r"[^;]*F(\d*\.?\d+)(\s|;|$)", line)
+    result = [None, None, None, None, None, line.partition(";")[2]]
+    if found_x: result[0] = float(found_x.group(1))
+    if found_y: result[1] = float(found_y.group(1))
+    if found_z: result[2] = float(found_z.group(1))
+    if found_e: result[3] = float(found_e.group(1))
+    if found_f: result[4] = float(found_f.group(1))
+    return result
+
+  def find_previous_xy(self, position):
+    """Backtrack in the buffer before @position, and return the previous X and Y coordinates
+    as a list, or None if X or Y could not be found. This is an inefficient operation and
+    should only be used when strictly necessary."""
+    found_x, found_y = None, None
+    for i in reversed(range(position)):
+      x, y = GCodeStreamer.parse_xy(self.buffer[i])
+      if x is not None:
+        found_x = x
+        if found_y is not None: break
+      if y is not None:
+        found_y = y
+        if found_x is not None: break
+    if found_x is None or found_y is None:
+      return None
+    return [found_x, found_y]
+
+  def split_move(self, position, time2):
+    """Try to split up the move at @position such that the second part takes approximately
+    @time2 seconds.
+    The return value is a boolean indicating whether the move could be split. Splitting
+    fails if the starting coordinates for this move could not be found before @position."""
+    # Inefficient but acceptable because it should only be done a few times. The alternative
+    # would be to keep track of previous X, Y for every line in the buffer, which would make
+    # the script much slower overall.
+    start_xy = self.find_previous_xy(position)
+    if not start_xy: return False
+
+    fraction = 1.0 - (time2 / self.buffer_times[position])
+    if debug:
+      assert(fraction > 0)
+    time1 = fraction * self.buffer_times[position]
+
+    end_xyzefc = GCodeStreamer.parse_xyzefc(self.buffer[position])
+    if end_xyzefc[0] is None and end_xyzefc[1] is None: return False
+    if end_xyzefc[0] is None: end_xyzefc[0] = start_xy[0]
+    elif end_xyzefc[1] is None: end_xyzefc[1] = start_xy[1]
+
+    # Strictly spoken Z should also be split for vase mode moves, but a print would need to be
+    # pretty pathological to have a move so long that the Z increase would need to be split to
+    # avoid a visible artefact. Given that we had to split the move, I assume most of the Z
+    # increase will be in the first part.
+    move_x, move_y = end_xyzefc[0] - start_xy[0], end_xyzefc[1] - start_xy[1]
+    mid_x, mid_y = start_xy[0] + fraction * move_x, start_xy[1] + fraction * move_y
+    if end_xyzefc[3]:
+      mid_e = " E{:.5f}".format(fraction * end_xyzefc[3])
+      end_e = " E{:.5f}".format((1.0 - fraction) * end_xyzefc[3])
+    else:
+      mid_e, end_e = "", ""
+    zed  = "" if end_xyzefc[2] is None else " Z{}".format(end_xyzefc[2])  # Zed's dead, baby.
+    feed = "" if end_xyzefc[4] is None else " F{}".format(end_xyzefc[4])
+    comment = " ;{}".format(end_xyzefc[5]) if end_xyzefc[5] else ""
+    new_lines = ["G1{} X{:.3f} Y{:.3f}{}{}{}".format(zed, mid_x, mid_y, mid_e, feed, comment),
+                 "G1 X{:.3f} Y{:.3f}{} ; split move for {:.2f}s extra lead time".format(
+                   end_xyzefc[0], end_xyzefc[1], end_e, time2)]
+    self.insert_buffer(position, new_lines, True)
+    self.buffer_times[position] = time1
+    self.buffer_times[position + 1] = time2
+    return True
 
   def drop_ahead_commands(self, commands):
     """Remove lines starting with any of the given command(s) in the lookahead buffer.
@@ -356,7 +453,8 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
   @speed is a float value between 0.0 and 255.0.
   @scale will be applied to @speed before generating the sequence.
   Speed will be clipped to @max_speed.i
-  If @skip_repeat, return empty list if the sequence is the same as in previous invocation."""
+  If @skip_repeat, return an empty list if the sequence is the same as in the previous
+  invocation with @skip_repeat."""
   global last_sequence
 
   s_speed = speed * scale
@@ -365,9 +463,10 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
     s_speed = max_speed
     clipped = ", clipped"
   sequence = speed_to_beep_sequence(s_speed)
-  if sequence == last_sequence and skip_repeat:
-    return []
-  last_sequence = sequence
+  if skip_repeat:
+    if sequence == last_sequence:
+      return []
+    last_sequence = sequence
 
   if s_speed:
     scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
@@ -386,17 +485,18 @@ def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
 def ramp_up_scale(z):
   return min(1.0, z * (1.0 - RAMP_UP_SCALE0) / RAMP_UP_ZMAX + RAMP_UP_SCALE0)
 
-def inject_beep_sequence(gcode, scale, lead_time=0.0):
+def inject_beep_sequence(gcode, scale, lead_time=0.0, allow_split=False):
   """Insert the beep sequence that matches the most recent fan speed seen in gcode, scaled
   by the given factor, back into the gcode. The position of the sequence will be chosen
   such that it leads the original moment of the fan speed command by an approximate
-  @lead_time seconds."""
+  @lead_time seconds.
+  If @allow_split, long moves may be split to obtain a more accurate lead_time."""
   commands = speed_to_M300_commands(gcode.current_target_speed, scale)
   if not commands:
     return False
 
   t_elapsed = 0.0
-  t_next = 0.0  # actually previous, since we're going backwards...
+  t_next = 0.0  # next in the file but previous in the algorithm, since we're going backwards...
   if debug:
     assert(len(gcode.buffer) == len(gcode.buffer_times))
   position = len(gcode.buffer_times)
@@ -422,22 +522,32 @@ def inject_beep_sequence(gcode, scale, lead_time=0.0):
     print_debug("  Backtrack: {:.3f} ~ {:.3f}; position {}".format(t_next, t_elapsed, position))
     # Try to pick a reasonable position between existing print moves
     if t_elapsed > 1.33 * lead_time:
+      ok = False
       if t_next >= 0.75 * lead_time:
         position += 1
         print_debug("    Picked {:.3f}: OK :)".format(t_next))
-      elif t_elapsed <= 2.0 * lead_time:
-        print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
-      else:
-        # TODO: we could split up the print move to get a good lead time! This must be optional
-        # though, because it could cause a hiccup that may be visible in the print. This should
-        # also only really be done when speeding up the fan, because it is more crucial to have
-        # enough cooling in time.
-        position += 1
-        print_debug("    Picked {:.3f}: too short :(".format(t_next))
+        ok = True
+      elif allow_split:
+        # Split the move such that the second part gives us the last bit of time needed to
+        # reach lead_time
+        ok = gcode.split_move(position, lead_time - t_next)
+        if ok:
+          position += 1
+          print_debug(
+            "    Split the move because neither {:.3f} nor {:.3f} is acceptable :P".format(
+            t_elapsed, t_next))
+        else:
+          print_debug("    Cannot split the move! :\\")
+      if not ok:
+        if t_elapsed <= 2.0 * lead_time:
+          print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
+        else:
+          position += 1
+          print_debug("    Picked {:.3f}: too short :(".format(t_next))
     else:
       print_debug("    Picked {:.3f}: good :D".format(t_elapsed))
 
-  if position < len(gcode.buffer) - 1:
+  if position < len(gcode.buffer):
     gcode.insert_buffer(position, commands)
   else:
     gcode.append_buffer(commands)
@@ -462,6 +572,8 @@ parser.add_argument('-s', '--scale0', type=float,
 parser.add_argument('-t', '--lead_time', type=float,
                     help='Number of seconds (approximately) to advance beep commands',
                     default=LEAD_TIME)
+parser.add_argument('-a', '--allow_split', action='store_true',
+                    help='Allow splitting long moves to maintain correct lead time. This may cause visible seams.')
 parser.add_argument('-f', '--feed_factor', type=float,
                     help='Factor between speed in mm/s and feedrate',
                     default=FEED_FACTOR)
@@ -475,19 +587,28 @@ args = parser.parse_args()
 
 if hasattr(args, 'debug'):
   debug = True
+allow_split = hasattr(args, 'allow_split')
 
 print_debug("Debug output enabled, prepare to be spammed")
 
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args.in_file, output, args.feed_factor, args.feed_limit_z)
+off_commands = speed_to_M300_commands(0.0, skip_repeat=False)
 try:
   # Assumption: anything before the end of the start G-code will only contain 'fan off'
   # instructions, either using M107, or M106 S0.
-  gcode.start(("M106", "M107"), speed_to_M300_commands(0.0))
+  if gcode.start(("M106", "M107"), off_commands):
+    last_sequence = speed_to_beep_sequence(0)
 except EOFError as err:
   print_error(err)
   sys.exit(1)
 
+params = {}
+for arg in vars(args):
+  params[arg] = getattr(args, arg)
+params['allow_split'] = allow_split
+del(params['in_file'], params['out_file'])
+gcode.append_buffer(["; pwm_postprocessor.py version {}, parameters: {}".format(VERSION, params)])
 print_debug("=== End of start G-code reached, now beginning actual processing ===")
 
 last_z = 0
@@ -508,7 +629,7 @@ while True:
   except EndOfPrint:
     if current_fan_speed:
       print_debug("End of print reached while fan still active: inserting off sequence")
-      gcode.append_buffer(speed_to_M300_commands(0.0))
+      gcode.append_buffer(off_commands)
     break
   print_debug("Interesting line: {}".format(lines[0]))
 
@@ -533,7 +654,7 @@ while True:
       # Do not move the final M107 forward, to maximize cooling of spiky things. Again rely
       # on look_ahead (will fail if there is filament-specific end code).
       lead = 0.0 if gcode.end_of_print and not new_fan_speed else args.lead_time
-      if not inject_beep_sequence(gcode, scale, lead):
+      if not inject_beep_sequence(gcode, scale, lead, allow_split):
         print_debug("    but sequence is same as before, hence skip")
       current_fan_speed = new_fan_speed
     else:
