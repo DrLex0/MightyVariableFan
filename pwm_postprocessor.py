@@ -81,7 +81,6 @@ SEQUENCE_LENGTH = 3
 
 VERSION = '0.1'
 debug = False
-last_sequence = []
 
 
 class EndOfPrint(Exception):
@@ -114,7 +113,9 @@ class GCodeStreamer(object):
     self.xyzf = [0.0, 0.0, 0.0, 1.0]
     self.end_of_print = False
     self.current_layer_z = None  # Not necessarily the same as xyzf[2]
-    self.current_target_speed = None
+    self.current_target_speed = None  # Speed as seen in self.buffer
+    self.ahead_target_speed = None  # Speed as seen in buffer_ahead
+    self.last_sequence = []
     self.m126_7_found = False
 
   def start(self, replace_commands=None, replace_lines=None, replace_once=True):
@@ -239,7 +240,8 @@ class GCodeStreamer(object):
         # An M106 without S argument will be treated as M106 S0 or M107.
         if fan_command.group(1) == "M106" and fan_command.group(3):
           speed = float(fan_command.group(3))
-        self.current_target_speed = speed
+        self.ahead_target_speed = speed
+        if not ahead: self.current_target_speed = speed
         return line
 
       if re.match(r"(M126|M127)(\s|;|$)", line):
@@ -251,39 +253,39 @@ class GCodeStreamer(object):
     line = self.buffer_ahead.popleft()
     self.buffer.append(line)
     self.buffer_times.append(self.buffer_ahead_times.popleft())
+    if line.startswith(("M106", "M107")):
+      self.current_target_speed = self.ahead_target_speed
     return line
 
   def get_next_event(self, look_ahead=0):
     """Read lines from the file until something interesting is encountered. This can either be:
       - an M106 or M107 command
       - a layer change (in case of vase mode prints, treat Z increase of 0.2 as a layer change)
-    Return value is an array with the interesting line and @look_ahead lines after it.
+    Return value is the interesting line.
     NOTE: the state of this GCodeStreamer will be updated according to all read lines, hence the
-      state will represent what was seen in the look_ahead lines. This helps with slicer quirks
+      state will include what was seen in the @look_ahead lines. This helps with slicer quirks
       like placing fan commands right before layer changes, or placing two fan commands immedia-
       tely after each other. It also avoids confusing a Z-hop travel move with a layer change.
     If end of file is reached, raise EOFError. If END_MARKER is reached, raise EndOfPrint."""
     if self.end_of_print:
       raise EndOfPrint("End of print code reached")
 
-    lines = []
     last_z = self.current_layer_z
     while True:
       line = self._get_next_ahead() if self.buffer_ahead else self._read_next_line()
       apparent_layer_change = (self.current_layer_z != last_z)
       if line.startswith(("M106", "M107")) or apparent_layer_change:
         # Something interesting happened!
-        lines.append(line)
         try:
           # Top up buffer_ahead if necessary
           for _ in xrange(look_ahead - len(self.buffer_ahead)):
-            lines.append(self._read_next_line(True))
+            self._read_next_line(True)
         except (EOFError, EndOfPrint):
           pass
         # Avoid treating Z-hop as an event: check whether Z was not reverted during look_ahead
         if look_ahead and apparent_layer_change and self.current_layer_z == last_z:
           continue
-        return lines
+        return line
 
   def pop(self, offset=0):
     """Removes the last line from the buffer (i.e. the first one returned by the last
@@ -401,6 +403,18 @@ class GCodeStreamer(object):
     self.buffer_times[position + 1] = time2
     return True
 
+  def ahead_time_until(self, commands):
+    """Return the total time estimate for commands in the ahead buffer until any of the given
+    command(s) is encountered. If none is encountered, return -1.0."""
+    time_total = 0.0
+    found = False
+    for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
+      if line.startswith(commands):
+        found = True
+        break
+      time_total += t
+    return time_total if found else -1.0
+
   def drop_ahead_commands(self, commands):
     """Remove lines starting with any of the given command(s) in the lookahead buffer.
     @commands may be a string or a tuple of strings."""
@@ -414,6 +428,112 @@ class GCodeStreamer(object):
         cleaned_times.append(t)
     self.buffer_ahead = cleaned
     self.buffer_ahead_times = cleaned_times
+
+  @staticmethod
+  def speed_to_beep_sequence(speed):
+    """Return a list with the indices of the beep frequencies that represent the given speed."""
+    quantized = int(round(float(speed) / 255 * (4**SEQUENCE_LENGTH - 1)))
+    sequence = deque()
+    while quantized:
+      quad = quantized % 4
+      sequence.appendleft(quad)
+      quantized = (quantized - quad) / 4
+    while len(sequence) < SEQUENCE_LENGTH:
+      sequence.appendleft(0)
+    return list(sequence)
+
+  def speed_to_M300_commands(self, speed, comment="", skip_repeat=True):
+    """Return a list with the commands to play a sequence that can be detected by beepdetect.py.
+    @speed is a float value between 0.0 and 255.0.
+    @comment will be inserted with the commands.
+    If @skip_repeat, return an empty list if the sequence is the same as in the previous
+    invocation with @skip_repeat."""
+    sequence = GCodeStreamer.speed_to_beep_sequence(speed)
+    if skip_repeat:
+      if sequence == self.last_sequence:
+        return []
+      self.last_sequence = sequence
+
+    commands = ["M300 S0 P200; {} -> sequence {}".format(
+                comment, "".join([str(i) for i in sequence]))]
+    for i in xrange(len(sequence)):
+      commands.append("M300 S{} P20".format(SIGNAL_FREQS[sequence[i]]))
+      if i < len(sequence) - 1:
+        commands.append("M300 S0 P100")
+    commands.append("M300 S0 P200; end sequence")
+    return commands
+
+  def inject_beep_sequence(self, speed, comment="", lead_time=0.0, allow_split=False):
+    """Insert the beep sequence representing @speed into the gcode, with @comment added.
+    The position of the sequence will be chosen such that it leads the last line in the
+    buffer by an approximate @lead_time seconds.
+    If @allow_split, long moves may be split to obtain a more accurate lead_time."""
+    commands = self.speed_to_M300_commands(speed, comment)
+    if not commands:
+      return False
+
+    if not lead_time:
+      self.append_buffer(commands)
+      return True
+
+    t_elapsed = 0.0
+    t_next = 0.0  # next in the file but previous in the algorithm, since we're going backwards...
+    if debug:
+      assert(len(self.buffer) == len(self.buffer_times))
+    position = len(self.buffer_times)
+    previous_sequence = False
+    for t in reversed(self.buffer_times):
+      position -= 1
+      t_next = t_elapsed
+      t_elapsed += t
+      if t_elapsed >= lead_time:
+        break
+      elif self.buffer[position] == "M300 S0 P200; end sequence":
+        # Ensure not to jump across previously inserted sequence: swapping commands would be bad!
+        previous_sequence = True
+        break
+    if previous_sequence:
+      print_debug("  Cannot backtrack more than {:.3f}s due to previous sequence".format(t_next))
+      position += 1
+    elif position == 0:
+      print_debug(
+        "Buffer too short to backtrack to lead time of {:.3f}s, it will only be {:.3f}s".format(
+        lead_time, t_elapsed))
+    else:
+      print_debug("    Backtrack: {:.3f} ~ {:.3f}; position {}".format(
+                  t_next, t_elapsed, position))
+      # Try to pick a reasonable position between existing print moves
+      if t_elapsed > 1.33 * lead_time:
+        ok = False
+        if t_next >= 0.75 * lead_time:
+          position += 1
+          print_debug("    Picked {:.3f}: OK :)".format(t_next))
+          ok = True
+        elif allow_split:
+          # Split the move such that the second part gives us the last bit of time needed to
+          # reach lead_time
+          ok = self.split_move(position, lead_time - t_next)
+          if ok:
+            position += 1
+            print_debug(
+              "    Split the move because neither {:.3f} nor {:.3f} is acceptable :P".format(
+              t_elapsed, t_next))
+          else:
+            print_debug("    Cannot split the move! :\\")
+        if not ok:
+          if t_elapsed <= 2.0 * lead_time:
+            print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
+          else:
+            position += 1
+            print_debug("    Picked {:.3f}: too short :(".format(t_next))
+      else:
+        print_debug("    Picked {:.3f}: good :D".format(t_elapsed))
+
+    if position < len(self.buffer):
+      self.insert_buffer(position, commands)
+    else:
+      self.append_buffer(commands)
+    return True
 
 
 def usage():
@@ -431,127 +551,8 @@ def print_error(message):
 def print_warning(message):
   print >> sys.stderr, "WARNING: {}".format(message)
 
-def speed_quantized(speed):
-  """Convert a speed in the 0-255 range to a quantized value that can be represented by a beep
-  sequence."""
-  return int(round(float(speed) / 255 * (4**SEQUENCE_LENGTH - 1)))
-
-def speed_to_beep_sequence(speed):
-  """Return a list with the indices of the beep frequencies that represent the given speed."""
-  value = speed_quantized(speed)
-  sequence = deque()
-  while value:
-    quad = value % 4
-    sequence.appendleft(quad)
-    value = (value - quad) / 4
-  while len(sequence) < SEQUENCE_LENGTH:
-    sequence.appendleft(0)
-  return list(sequence)
-
-def speed_to_M300_commands(speed, scale=1.0, max_speed=255.0, skip_repeat=True):
-  """Return a list with the commands to play a sequence that can be detected by beepdetect.py.
-  @speed is a float value between 0.0 and 255.0.
-  @scale will be applied to @speed before generating the sequence.
-  Speed will be clipped to @max_speed.i
-  If @skip_repeat, return an empty list if the sequence is the same as in the previous
-  invocation with @skip_repeat."""
-  global last_sequence
-
-  s_speed = speed * scale
-  clipped = ""
-  if s_speed > max_speed:
-    s_speed = max_speed
-    clipped = ", clipped"
-  sequence = speed_to_beep_sequence(s_speed)
-  if skip_repeat:
-    if sequence == last_sequence:
-      return []
-    last_sequence = sequence
-
-  if s_speed:
-    scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
-    comment = "fan PWM {}{}{} = {:.2f}%".format(speed, scaled, clipped, s_speed / 2.55)
-  else:
-    comment = "fan off"
-  commands = ["M300 S0 P200; {} -> sequence {}".format(
-              comment, "".join([str(i) for i in sequence]))]
-  for i in xrange(len(sequence)):
-    commands.append("M300 S{} P20".format(SIGNAL_FREQS[sequence[i]]))
-    if i < len(sequence) - 1:
-      commands.append("M300 S0 P100")
-  commands.append("M300 S0 P200; end sequence")
-  return commands
-
 def ramp_up_scale(z):
   return min(1.0, z * (1.0 - RAMP_UP_SCALE0) / RAMP_UP_ZMAX + RAMP_UP_SCALE0)
-
-def inject_beep_sequence(gcode, scale, lead_time=0.0, allow_split=False):
-  """Insert the beep sequence that matches the most recent fan speed seen in gcode, scaled
-  by the given factor, back into the gcode. The position of the sequence will be chosen
-  such that it leads the original moment of the fan speed command by an approximate
-  @lead_time seconds.
-  If @allow_split, long moves may be split to obtain a more accurate lead_time."""
-  commands = speed_to_M300_commands(gcode.current_target_speed, scale)
-  if not commands:
-    return False
-
-  t_elapsed = 0.0
-  t_next = 0.0  # next in the file but previous in the algorithm, since we're going backwards...
-  if debug:
-    assert(len(gcode.buffer) == len(gcode.buffer_times))
-  position = len(gcode.buffer_times)
-  previous_sequence = False
-  for t in reversed(gcode.buffer_times):
-    position -= 1
-    t_next = t_elapsed
-    t_elapsed += t
-    if t_elapsed >= lead_time:
-      break
-    elif gcode.buffer[position] == "M300 S0 P200; end sequence":
-      # Ensure not to jump across previously inserted sequence: swapping commands would be bad!
-      previous_sequence = True
-      break
-  if previous_sequence:
-    print_debug("  Cannot backtrack more than {:.3f}s due to previous sequence".format(t_next))
-    position += 1
-  elif position == 0:
-    print_debug(
-      "Buffer too short to backtrack to lead time of {:.3f}s, it will only be {:.3f}s".format(
-      lead_time, t_elapsed))
-  else:
-    print_debug("  Backtrack: {:.3f} ~ {:.3f}; position {}".format(t_next, t_elapsed, position))
-    # Try to pick a reasonable position between existing print moves
-    if t_elapsed > 1.33 * lead_time:
-      ok = False
-      if t_next >= 0.75 * lead_time:
-        position += 1
-        print_debug("    Picked {:.3f}: OK :)".format(t_next))
-        ok = True
-      elif allow_split:
-        # Split the move such that the second part gives us the last bit of time needed to
-        # reach lead_time
-        ok = gcode.split_move(position, lead_time - t_next)
-        if ok:
-          position += 1
-          print_debug(
-            "    Split the move because neither {:.3f} nor {:.3f} is acceptable :P".format(
-            t_elapsed, t_next))
-        else:
-          print_debug("    Cannot split the move! :\\")
-      if not ok:
-        if t_elapsed <= 2.0 * lead_time:
-          print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
-        else:
-          position += 1
-          print_debug("    Picked {:.3f}: too short :(".format(t_next))
-    else:
-      print_debug("    Picked {:.3f}: good :D".format(t_elapsed))
-
-  if position < len(gcode.buffer):
-    gcode.insert_buffer(position, commands)
-  else:
-    gcode.append_buffer(commands)
-  return True
 
 
 parser = argparse.ArgumentParser(
@@ -593,12 +594,12 @@ print_debug("Debug output enabled, prepare to be spammed")
 
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args.in_file, output, args.feed_factor, args.feed_limit_z)
-off_commands = speed_to_M300_commands(0.0, skip_repeat=False)
+off_commands = gcode.speed_to_M300_commands(0.0, "fan off", skip_repeat=False)
 try:
   # Assumption: anything before the end of the start G-code will only contain 'fan off'
   # instructions, either using M107, or M106 S0.
   if gcode.start(("M106", "M107"), off_commands):
-    last_sequence = speed_to_beep_sequence(0)
+    gcode.last_sequence = GCodeStreamer.speed_to_beep_sequence(0)
 except EOFError as err:
   print_error(err)
   sys.exit(1)
@@ -611,9 +612,7 @@ del(params['in_file'], params['out_file'])
 gcode.append_buffer(["; pwm_postprocessor.py version {}, parameters: {}".format(VERSION, params)])
 print_debug("=== End of start G-code reached, now beginning actual processing ===")
 
-last_z = 0
-layers_with_fan = 0
-current_fan_speed = None  # Actual scaled and clipped speed
+current_fan_speed = 0.0  # Actual scaled speed. Assume fan always off at start.
 while True:
   try:
     # look_ahead must be at least:
@@ -622,7 +621,7 @@ while True:
     #   2 to already be aware of changed Z in case of fan command followed by layer change,
     #   3 to combine the previous two cases.
     # This is again Slic3r-specific, it inserts M106 before changing the layer.
-    lines = gcode.get_next_event(3)
+    line = gcode.get_next_event(3)
   except EOFError:
     print_error("Unexpected end of file reached!")
     sys.exit(1)
@@ -631,35 +630,85 @@ while True:
       print_debug("End of print reached while fan still active: inserting off sequence")
       gcode.append_buffer(off_commands)
     break
-  print_debug("Interesting line: {}".format(lines[0]))
+  print_debug("Interesting line: {}".format(line))
 
-  what = None
-  if lines[0].startswith(("M106", "M107")):
+  layer_change = False
+  if line.startswith(("M106", "M107")):
     gcode.pop()  # Get rid of this invalid Sailfish command
-    what = "Fan command"
-  elif gcode.current_target_speed is not None:
-    # Layer change: check if we need to update fan speed
-    what = "Layer change {}".format(gcode.current_layer_z)
+    print_debug("  -> Fan command")
+  elif gcode.ahead_target_speed is not None:
+    # Layer change while fan is active: check if we need to update fan speed
+    print_debug("  -> Layer change {}".format(gcode.current_layer_z))
+    layer_change = True
+  else:
+    print_debug("  -> Layer change {}, but fan is off".format(gcode.current_layer_z))
+    continue
 
-  if what:
-    # If there are multiple fan commands very close to each other, it is pointless to execute them
-    # all. The last one seen in the lookahead buffer determines the speed, the rest is dropped.
-    gcode.drop_ahead_commands(("M106", "M107"))
-    scale = ramp_up_scale(gcode.current_layer_z)
-    new_fan_speed = gcode.current_target_speed * scale
-    if new_fan_speed != current_fan_speed:
-      scaled = " scaled by {:.2f} = {:.2f}".format(scale, new_fan_speed) if scale < 1.0 else ""
-      print_debug("  {} -> set fan speed to {:.2f}{}".format(
-                  what, gcode.current_target_speed, scaled))
-      # Do not move the final M107 forward, to maximize cooling of spiky things. Again rely
-      # on look_ahead (will fail if there is filament-specific end code).
-      lead = 0.0 if gcode.end_of_print and not new_fan_speed else args.lead_time
-      if not inject_beep_sequence(gcode, scale, lead, allow_split):
-        print_debug("    but sequence is same as before, hence skip")
-      current_fan_speed = new_fan_speed
-    else:
-      print_debug("  {} -> already at required speed {}".format(
-                  what, current_fan_speed))
+  # Determine both the speed we would need to set according to this event and any speed
+  # command in the ahead buffer. Both will be scaled according to the (ahead) Z coordinate.
+  scale = ramp_up_scale(gcode.current_layer_z)
+  now_fan_speed = gcode.current_target_speed * scale
+  ahead_fan_speed = gcode.ahead_target_speed * scale
+  original_speed = gcode.current_target_speed
+
+  if now_fan_speed != ahead_fan_speed:
+    # Two commands (or layer change + command) very close to each other. See if we cannot do
+    # anything smarter than what the slicer tries to make us do.
+    t_ahead = gcode.ahead_time_until(("M106", "M107"))
+    if debug:
+      assert(t_ahead >= 0)
+    if t_ahead < 0.1:
+      # Either t == 0.0 because the slicer program suffered a fit of dementia and inserted two
+      # speed changes without anything in between them, or there is only a ridiculously short
+      # move in between the commands and it is pointless to try to spin the fan up or down just
+      # for that period. Immediately jump to the final speed.
+      print_debug("  Replacing this speed change with {} that follows within 0.1s".format(
+                  ahead_fan_speed))
+      now_fan_speed = ahead_fan_speed
+      original_speed = gcode.ahead_target_speed
+      # optimization: avoid triggering another event for the command we already handled
+      gcode.drop_ahead_commands(("M106", "M107"))
+    elif (now_fan_speed < current_fan_speed and now_fan_speed < ahead_fan_speed
+          and t_ahead < 1.5):
+      # It is pointless to try to spin down the fan for such a short time due to inertia.
+      if ahead_fan_speed <= current_fan_speed:
+        # Either we're maintaining speed or slowing down: set ahead as target speed
+        print_debug("  No use slowing down for {:.2f}s, advance to upcoming speed {}".format(
+                    t_ahead, ahead_fan_speed))
+        now_fan_speed = ahead_fan_speed
+        original_speed = gcode.ahead_target_speed
+        gcode.drop_ahead_commands(("M106", "M107"))  # optimization
+      else:
+        # We'll be speeding up: just maintain current speed and ignore this event entirely
+        print_debug("  No use slowing down for {:.2f}s before upcoming speed-up, skip".format(
+                    t_ahead))
+        continue
+
+  if now_fan_speed == current_fan_speed:
+    print_debug("    -> already at required speed {}".format(current_fan_speed))
+    continue
+
+  if now_fan_speed:
+    scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
+    comment = "fan PWM {}{} = {:.2f}%".format(original_speed, scaled, now_fan_speed / 2.55)
+  else:
+    comment = "fan off"
+  if layer_change:
+    comment += " (layer change)"
+  # Do not move the final M107 forward, to maximize cooling of spiky things. Again rely
+  # on look_ahead (will fail if there is filament-specific end code).
+  if gcode.end_of_print and not now_fan_speed:
+    lead = 0.0
+    comment += ", no backtrack"
+  else:
+    lead = args.lead_time
+  print_debug("    -> set {}".format(comment))
+
+  # No point in trying to get perfect timing on a fan speed update due to layer change.
+  split_it = False if layer_change else allow_split
+  if not gcode.inject_beep_sequence(now_fan_speed, comment, lead, split_it):
+    print_debug("      but sequence is same as before, hence skip")
+  current_fan_speed = now_fan_speed
 
 gcode.stop()
 
