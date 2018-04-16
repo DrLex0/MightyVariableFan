@@ -92,13 +92,15 @@ class GCodeStreamer(object):
   a buffer of the last read lines. When a new line is read and the buffer exceeds a certain size,
   the oldest line(s) will be popped from the buffer and sent to output."""
 
-  def __init__(self, in_file, output, feed_factor, feed_limit_z, max_buffer=64):
+  def __init__(self, config, output, max_buffer=64):
     """@max_buffer is the largest number of lines that will be kept in memory before sending
     the oldest ones to output while reading new lines."""
-    self.in_file = in_file
+    self.in_file = config.in_file
+    self.feed_factor = config.feed_factor
+    self.feed_limit_z = config.feed_limit_z
+    self.timings = hasattr(config, 'timings')
+
     self.output = output
-    self.feed_factor = feed_factor
-    self.feed_limit_z = feed_limit_z
     self.max_buffer = max_buffer
 
     self.buffer = deque()
@@ -142,12 +144,18 @@ class GCodeStreamer(object):
 
   def stop(self):
     """Output the rest of the buffers, and the rest of the file."""
-    for line in self.buffer:
-      print >> self.output, line
+    if self.timings:
+      for line, t in itertools.izip(self.buffer, self.buffer_times):
+        print >> self.output, ("{}; {:.3f}".format(line, t) if t else line)
+      for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
+        print >> self.output, ("{}; {:.3f}".format(line, t) if t else line)
+    else:
+      for line in self.buffer:
+        print >> self.output, line
+      for line in self.buffer_ahead:
+        print >> self.output, line
     self.buffer.clear()
     self.buffer_times.clear()
-    for line in self.buffer_ahead:
-      print >> self.output, line
     self.buffer_ahead.clear()
     self.buffer_ahead_times.clear()
     while True:
@@ -214,9 +222,15 @@ class GCodeStreamer(object):
         self.buffer_ahead.append(line)
       else:
         self.buffer.append(line)
-        while len(self.buffer) > self.max_buffer:
-          print >> self.output, self.buffer.popleft()
-          self.buffer_times.popleft()
+        if self.timings:
+          while len(self.buffer) > self.max_buffer:
+            l = self.buffer.popleft()
+            t = self.buffer_times.popleft()
+            print >> self.output, ("{}; {:.3f}".format(l, t) if t else l)
+        else:
+          while len(self.buffer) > self.max_buffer:
+            print >> self.output, self.buffer.popleft()
+            self.buffer_times.popleft()
 
       times = self.buffer_ahead_times if ahead else self.buffer_times
       if line.startswith(END_MARKER):
@@ -503,7 +517,9 @@ class GCodeStreamer(object):
       print_debug("    Backtrack: {:.3f} ~ {:.3f}; position {}".format(
                   t_next, t_elapsed, position))
       # Try to pick a reasonable position between existing print moves
-      if t_elapsed > 1.33 * lead_time:
+      # TODO: could discern between speeding up and slowing down. For slow-down it is more
+      #   acceptable to be too late than for speed-up.
+      if t_elapsed > 1.25 * lead_time:
         ok = False
         if t_next >= 0.75 * lead_time:
           position += 1
@@ -525,7 +541,7 @@ class GCodeStreamer(object):
             print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
           else:
             position += 1
-            print_debug("    Picked {:.3f}: too short :(".format(t_next))
+            print_debug("    Picked {:.3f}: too late :(".format(t_next))
       else:
         print_debug("    Picked {:.3f}: good :D".format(t_elapsed))
 
@@ -562,8 +578,16 @@ parser = argparse.ArgumentParser(
 # SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
 parser.add_argument('in_file', type=argparse.FileType('r'),
                     help='file to process')
+parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
+                    help='optional file to write to (default is to print to standard output)')
+parser.add_argument('-a', '--allow_split', action='store_true',
+                    help='Allow splitting long moves to maintain correct lead time. This may cause visible seams.')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='enable debug output on stderr')
+parser.add_argument('-i', '--timings', action='store_true',
+                    help='Append a comment with estimated nonzero time to each line')
+parser.add_argument('-P', '--no_process', action='store_true',
+                    help='Output the file without doing fan command processing, useful in combination with --timings')
 parser.add_argument('-z', '--zmax', type=float,
                     help='Z coordinate below which fan speed will be linearly ramped up',
                     default=RAMP_UP_ZMAX)
@@ -573,36 +597,47 @@ parser.add_argument('-s', '--scale0', type=float,
 parser.add_argument('-t', '--lead_time', type=float,
                     help='Number of seconds (approximately) to advance beep commands',
                     default=LEAD_TIME)
-parser.add_argument('-a', '--allow_split', action='store_true',
-                    help='Allow splitting long moves to maintain correct lead time. This may cause visible seams.')
 parser.add_argument('-f', '--feed_factor', type=float,
                     help='Factor between speed in mm/s and feedrate',
                     default=FEED_FACTOR)
 parser.add_argument('-l', '--feed_limit_z', type=float,
                     help='Maximum feedrate for the Z axis',
                     default=FEED_LIMIT_Z)
-parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
-                    help='optional file to write to (default is to print to standard output)')
 
 args = parser.parse_args()
 
-if hasattr(args, 'debug'):
-  debug = True
+debug = hasattr(args, 'debug')
 allow_split = hasattr(args, 'allow_split')
+no_process = hasattr(args, 'no_process')
 
 print_debug("Debug output enabled, prepare to be spammed")
 
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
-gcode = GCodeStreamer(args.in_file, output, args.feed_factor, args.feed_limit_z)
+gcode = GCodeStreamer(args, output)
 off_commands = gcode.speed_to_M300_commands(0.0, "fan off", skip_repeat=False)
 try:
-  # Assumption: anything before the end of the start G-code will only contain 'fan off'
-  # instructions, either using M107, or M106 S0.
-  if gcode.start(("M106", "M107"), off_commands):
-    gcode.last_sequence = GCodeStreamer.speed_to_beep_sequence(0)
+  if no_process:
+    gcode.start()
+  else:
+    # Assumption: anything before the end of the start G-code will only contain 'fan off'
+    # instructions, either using M107, or M106 S0.
+    if gcode.start(("M106", "M107"), off_commands):
+      gcode.last_sequence = GCodeStreamer.speed_to_beep_sequence(0)
 except EOFError as err:
   print_error(err)
   sys.exit(1)
+
+if no_process:
+  while True:
+    try:
+      line = gcode.get_next_event()
+    except EOFError:
+      print_error("Unexpected end of file reached!")
+      sys.exit(1)
+    except EndOfPrint:
+      break
+  gcode.stop()
+  sys.exit(0)
 
 params = {}
 for arg in vars(args):
@@ -659,9 +694,13 @@ while True:
       assert(t_ahead >= 0)
     if t_ahead < 0.1:
       # Either t == 0.0 because the slicer program suffered a fit of dementia and inserted two
-      # speed changes without anything in between them, or there is only a ridiculously short
+      # speed changes with nothing in between them, or there is only one ridiculously short
       # move in between the commands and it is pointless to try to spin the fan up or down just
       # for that period. Immediately jump to the final speed.
+      # Mind that only one short bridge move can cause this scenario: if there are more moves,
+      # look_ahead won't see the ending M106 command even if the moves take less than 0.1s.
+      # This is good because cooling a short bridge move is useless, but cooling a sharp
+      # overhanging corner, even if it is tiny, is useful.
       print_debug("  Replacing this speed change with {} that follows within 0.1s".format(
                   ahead_fan_speed))
       now_fan_speed = ahead_fan_speed
