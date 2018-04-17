@@ -33,11 +33,11 @@ from collections import deque
 
 # Z coordinate (mm) below which fan speeds will be linearly scaled with increasing Z.
 # The correct value for this depends heavily on the design of your fan duct and extruder assembly.
-RAMP_UP_ZMAX = 9.0
+RAMP_UP_ZMAX = 5.0
 
 # The scale factor at Z=0. In other words, the linear scaling curve is a line between the points
 # (0.0, RAMP_UP_SCALE0) and (RAMP_UP_ZMAX, 1.0) on a (Z, scale) graph.
-RAMP_UP_SCALE0 = 0.1
+RAMP_UP_SCALE0 = 0.05
 
 # The number of seconds to shift fan commands forward in time, to compensate for time needed to
 # play and decode the sequence, and spin up the fan. This will only be approximate, because time
@@ -92,7 +92,7 @@ class GCodeStreamer(object):
   a buffer of the last read lines. When a new line is read and the buffer exceeds a certain size,
   the oldest line(s) will be popped from the buffer and sent to output."""
 
-  def __init__(self, config, output, max_buffer=64):
+  def __init__(self, config, output, max_buffer=96):
     """@max_buffer is the largest number of lines that will be kept in memory before sending
     the oldest ones to output while reading new lines."""
     self.in_file = config.in_file
@@ -552,11 +552,6 @@ class GCodeStreamer(object):
     return True
 
 
-def usage():
-  print """Usage: $0 [-hd] inputFile
-  -d: debug mode (extra spam on stderr)"
-  -h: usage information"""
-
 def print_debug(message):
   if debug:
     print >> sys.stderr, message
@@ -707,6 +702,7 @@ while True:
       original_speed = gcode.ahead_target_speed
       # optimization: avoid triggering another event for the command we already handled
       gcode.drop_ahead_commands(("M106", "M107"))
+      gcode.current_target_speed = gcode.ahead_target_speed
     elif (now_fan_speed < current_fan_speed and now_fan_speed < ahead_fan_speed
           and t_ahead < 1.5):
       # It is pointless to try to spin down the fan for such a short time due to inertia.
@@ -717,6 +713,7 @@ while True:
         now_fan_speed = ahead_fan_speed
         original_speed = gcode.ahead_target_speed
         gcode.drop_ahead_commands(("M106", "M107"))  # optimization
+        gcode.current_target_speed = gcode.ahead_target_speed
       else:
         # We'll be speeding up: just maintain current speed and ignore this event entirely
         print_debug("  No use slowing down for {:.2f}s before upcoming speed-up, skip".format(
