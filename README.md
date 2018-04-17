@@ -18,6 +18,8 @@ I have looked for sensible ways to implement PWM for the fan, in such a way that
 
 To make all this work, you need some minimal understanding of Linux, and at least basic electronics skills. Being able to solder might not be essential, but will make it much easier than trying to find ready-made components that will fit. Also, this has only been tested with Slic3r, and quite likely the post-processing script that generates the beep sequences will only work with Slic3r-generated G-code at this moment. Of course, the main reason why I have published this on GitHub is to make it easy for anyone to modify the code and commit updates to make it work with other slicer programs.
 
+Mind that this is still in an **experimental stage.** See the *Current Issues* section at the bottom.
+
 
 ### How It Works
 
@@ -94,7 +96,9 @@ Finally, add the following line before the “`exit 0`” line in `/etc/rc.local
 ```
 /usr/local/bin/startpwmservices
 ```
-Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance configure the WiFi connection, SSH access with public key, change the hostname, … How to do those things, is outside the scope of this guide.
+Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, change the hostname, … You should also disable everything you don't need, for instance you should most likely disable the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
+If you are really adamant on getting the best possible performance, you could install a real-time kernel. However, this seems overkill from my experiences so far.<br>
+How to do those things, is outside the scope of this guide. There is plenty of community support available for the Raspberry Pi!
 
 Originally I planned to add some kind of display with buttons, or maybe a touchscreen, to be able to view and manipulate the status of the PWM controller. However, the only good display I found was more expensive than the Pi itself, and I realized that a smartphone or even a smartwatch also makes a fine wireless touch display, so I didn't bother.
 
@@ -175,7 +179,7 @@ Once you have the setup running, all that is left to be done is to generate your
 Inside the script, you must make one important change: set `END_MARKER` to a line that indicates the print has ended. Most likely you are using your own snippet of end G-code, just ensure it starts with a unique comment line and copy that exact line into the script. There are other adjustments you can make, these can also be passed as command-line arguments:
 
 * `RAMP_UP_ZMAX` is the zone above the build plate within which fan speeds will be gradually scaled starting from a scale factor `RAMP_UP_SCALE0` at *Z* = 0, to 100% at *Z* = `RAMP_UP_ZMAX`. The reason why this is recommended, is because airflow from the cooling duct bounces off the bed at the lower layers, and it is also being forced in between the bed and the extruders. This causes more cooling than expected, and it can also cause extruder temperature to drop if the fan suddenly activates at high speed. The optimal values of these parameters will differ depending on what kind of cooling duct design you use. You will have to experiment. Important: if you are using Cura, you should disable its similar feature that scales fan speeds depending on layer number. The system used by this script is better because it uses a fixed Z height instead of counting layers that might have different heights.
-* `LEAD_TIME` is the number of seconds by which beep sequences should be moved forward in time. A sequence takes about 0.6 seconds to be played and detected, and the time needed to spin up the fan must also be considered, hence a value around 1 second should be reasonable. Mind that this is done on a best-effort basis. The time will not always be exact because granularity depends on duration of print moves. If the last move before an original M106 command takes more than twice `LEAD_TIME`, the script will not be able to anticipate the beep sequence. (I plan to add an option to split long print moves if needed.)
+* `LEAD_TIME` is the number of seconds by which beep sequences should be moved forward in time. A sequence takes about 0.6 seconds to be played and detected, and the time needed to spin up the fan must also be considered, hence a value around 1 second should be reasonable, in my case 1.3 seconds seems optimal. Mind that this is done on a best-effort basis. The time will not always be exact because granularity depends on duration of print moves. If the last move before an original M106 command takes more than twice `LEAD_TIME`, the script will not be able to anticipate the beep sequence. The script can split up long moves to obtain a good lead time, this is the `--allow_split` option which is off by default. It is possible that enabling this option can cause visible artefacts, so there is a bit of a trade-off between cooling performance and surface quality.
 * `FEED_FACTOR` and `FEED_LIMIT_Z` are values specific to the FlashForge Creator Pro and it is unlikely you need to change them, only do so if you know what you are doing.
 
 **Important:** the script in its current state is not yet aware of dual extrusion. It will especially not work with my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html).
@@ -191,6 +195,13 @@ In the Tools folder, there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that pl
 * as a quick routine test of the fan system after booting up your printer. This is especially recommended if you're about to do a print where correct cooling is crucial. So far I've had one occasion where the microphone didn't pick up any sound after I had taken the system apart and reassembled it (most likely a bad contact with the 3.5 mm plug, it was fixed after I had cleaned the plug and reinserted it).
 
 Last but not least, if you previously neglected fan speed values in your slicer profiles (as you should have), now is the time to go through them again and try to enter sensible values. Optimal values will differ between each filament, and also depend on what kind of extruder, nozzle, and cooling duct you are using. Be prepared to experiment and tweak!
+
+
+## Current Issues
+
+There is still a reliability problem with my current setup, sometimes beepdetect.py seems to become deaf for a short period and I'm not sure if this is due to the cheap USB sound card, or a problem with audio recording on the Raspberry Pi in general.
+
+Another problem is that recent versions of the FFCP firmware always play a song whenever a heater has reached its target temperature. This was not the case in the original Sailfish firmware that came with my printer, it was introduced when I upgraded it through FlashPrint. I have always found this annoying and useless, but now it becomes a hazard because if this song is played exactly at the moment a sequence is being played, it will be interrupted and the fan will not change speed. I want to disable the playing of this song when a target temperature has been reached. If anyone knows how to do this without recompiling and flashing a custom Sailfish build, I'd like to know how!
 
 
 ### Disclaimer
