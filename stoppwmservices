@@ -14,8 +14,8 @@ function kill_it
 	fi
 }
 
-pwm_pid=$(ps aux | grep -v grep | grep 'python .*pwm_server.py' | awk '{print $2}')
-beep_pid=$(ps aux | grep -v grep | grep 'python .*beepdetect.py' | awk '{print $2}')
+pwm_pid=$(ps aux | grep -v grep | grep -E 'python2? .*pwm_server.py' | awk '{print $2}')
+beep_pid=$(ps aux | grep -v grep | grep -E 'python2? .*beepdetect.py' | awk '{print $2}')
 
 kill_it "$pwm_pid" "PWM server"
 kill_it "$beep_pid" "beep detector"
