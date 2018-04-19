@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 """
 Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.
 Make sure this is started at about the same time the PWM control server has fully started.
@@ -32,7 +32,7 @@ Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 Released under Creative Commons Attribution 4.0 International license.
 """
 
-from __future__ import print_function
+
 import argparse
 import os
 import sys
@@ -41,9 +41,10 @@ from operator import add
 from time import sleep, time
 
 import pyaudio
+import requests
+# pylint: disable=no-name-in-module
 from numpy import short, fromstring, zeros
 from scipy import fft
-from requests import ConnectionError
 from requests_futures.sessions import FuturesSession
 
 
@@ -227,7 +228,7 @@ def open_input_stream(audio):
 def seq_to_value(sequence):
     """Converts a sequence of base 4 numbers to an integer."""
     value = 0
-    for i in xrange(0, len(sequence), 1):
+    for i in range(0, len(sequence), 1):
         value += 4 ** i * sequence[-(i+1)]
     return value
 
@@ -271,7 +272,7 @@ def start_detecting(audio, options):
             else:
                 print("ERROR: test request to PWM server failed with status {}".format(
                     req.status_code))
-        except ConnectionError as err:
+        except requests.ConnectionError as err:
             print("ERROR: the PWM server may be down? {}".format(err))
         attempts -= 1
         print("Attempts left: {}".format(attempts))
@@ -282,7 +283,7 @@ def start_detecting(audio, options):
     # TODO: make some basic logging handler so I don't need to call this all the time
     sys.stdout.flush()
 
-    sig_bin_indices = range(0, len(SIG_BINS))
+    sig_bin_indices = list(range(0, len(SIG_BINS)))
     empty_sig_bins = zeros(len(SIG_BINS))
     last_sig_bins = empty_sig_bins[:]  # Ensure to copy by value, not reference
 
@@ -318,7 +319,7 @@ def start_detecting(audio, options):
         # Each data point is a signed 16 bit number, so divide by 2^15 to get more reasonable FFT
         # values. Because our input is real (no imaginary component), we can ditch the redundant
         # second half of the FFT.
-        intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
+        intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES // 2])
         detections.time_increment()
 
         # Check any previously created requests to the PWM server.
@@ -333,7 +334,7 @@ def start_detecting(audio, options):
                     if req.status_code != 200:
                         print("ERROR: request to PWM server failed with status {}".format(
                             req.status_code))
-                except ConnectionError as err:
+                except requests.ConnectionError as err:
                     print("ERROR: could not connect to PWM server: {}".format(err))
 
         if DETECT_CONTINUOUS:
@@ -359,7 +360,7 @@ def start_detecting(audio, options):
         # See if one of our signal frequencies occurred. Sum responses over current and previous
         # windows, to get a more consistent intensity value even when beep spans two windows.
         current_sig_bins = [intensity[SIG_BINS[i]] for i in sig_bin_indices]
-        total_sig_bins = map(add, last_sig_bins, current_sig_bins)
+        total_sig_bins = list(map(add, last_sig_bins, current_sig_bins))
         signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
         last_sig_bins = current_sig_bins[:]
 
@@ -394,7 +395,7 @@ def calibration(audio, options):
 
     sig_bins_groups = [[x-1, x, x+1] for x in SIG_BINS]
     sig_bins_ext = [sig_bin for group in sig_bins_groups for sig_bin in group]  # flatten it
-    sig_bin_indices = range(0, len(sig_bins_ext))
+    sig_bin_indices = list(range(0, len(sig_bins_ext)))
     last_sig_bins = zeros(len(sig_bins_ext))
     global_sig_bins = last_sig_bins[:]
     clipped = False
@@ -430,15 +431,15 @@ def calibration(audio, options):
             elif amin == 0 and amax == 0:
                 print("WARNING: perfect silence detected, this is highly unlikely")
 
-            intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES/2])
+            intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES // 2])
             current_sig_bins = [intensity[sig_bins_ext[i]] for i in sig_bin_indices]
-            total_sig_bins = map(add, last_sig_bins, current_sig_bins)
+            total_sig_bins = list(map(add, last_sig_bins, current_sig_bins))
             signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
             last_sig_bins = current_sig_bins[:]
             if signals:
                 # Only add to the statistics if there is any 'detected' signal, to avoid
                 # accumulating noise
-                global_sig_bins = map(add, global_sig_bins, current_sig_bins)
+                global_sig_bins = list(map(add, global_sig_bins, current_sig_bins))
                 out = ["{:.3f}".format(total_sig_bins[i])
                        for i in sig_bin_indices if (i + 2) % 3 == 0]
                 print("  ".join(out))
@@ -461,7 +462,7 @@ def calibration(audio, options):
     bins_vs_intensities = {
         global_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices if global_sig_bins[i] > 0
     }
-    sorted_bins = [value for _, value in sorted(bins_vs_intensities.iteritems(), reverse=True)]
+    sorted_bins = [value for _, value in sorted(iter(bins_vs_intensities.items()), reverse=True)]
     print(
         "Bins, including neighboring ones, sorted by average response intensity from high to low:")
     print(" > ".join(map(str, sorted_bins)))

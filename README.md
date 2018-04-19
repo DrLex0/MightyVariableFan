@@ -70,12 +70,11 @@ You need:
 ### Step 2: prepare the Raspberry Pi
 
 On your Pi, assuming you are running Raspbian Stretch or newer, you need to ensure the following Debian packages are installed. You can run `sudo aptitude` to install them in a console UI, or simply do `sudo apt-get install` followed by a space-separated list of the package names:
-* numpy
-* scipy
-* pyaudio
-* python-cherrypy3
-* python-requests-futures
-* python-rpi.gpio
+* python3-scipy
+* python3-pyaudio
+* python3-cherrypy3
+* python3-requests-futures
+* python3-rpi.gpio
 
 Next, copy the following files from this project to `/usr/local/bin/` on your Pi, and make them all executable:
 * beepdetect.py
@@ -176,7 +175,7 @@ Once you're done, either reboot the Pi or run `sudo startpwmservices` to resume 
 
 Once you have the setup running, all that is left to be done is to generate your print files such that they contain beep sequences instead of the old M126 and M127 commands. The problem is that slicer programs are aware of the limited fan capability of MightyBoard-based printers, hence they only output those commands without any speed information if you ask them to output Sailfish-compatible G-code. The solution is to change your slicer profile to output G-code for RepRap instead, and use the *pwm_postprocessor.py* script to translate the variable fan speed commands M106 and M107 into sequences. This script has so far only been tested with G-code produced by *Slic3r.* It might work with other slicers, but most likely the script will require a few modifications.
 
-Inside the script, you must make one important change: set `END_MARKER` to a line that indicates the print has ended. Most likely you are using your own snippet of end G-code, just ensure it starts with a unique comment line and copy that exact line into the script. There are other adjustments you can make, these can also be passed as command-line arguments:
+You need *Python 3.5* or newer on the machine where you'll be running the postprocessor script. Inside the script, you must make one important change: set `END_MARKER` to a line that indicates the print has ended. Most likely you are using your own snippet of end G-code, just ensure it starts with a unique comment line and copy that exact line into the script. There are other adjustments you can make, these can also be passed as command-line arguments:
 
 * `RAMP_UP_ZMAX` is the zone above the build plate within which fan speeds will be gradually scaled starting from a scale factor `RAMP_UP_SCALE0` at *Z* = 0, to 100% at *Z* = `RAMP_UP_ZMAX`. The reason why this is recommended, is because airflow from the cooling duct bounces off the bed at the lower layers, and it is also being forced in between the bed and the extruders. This causes more cooling than expected, and it can also cause extruder temperature to drop if the fan suddenly activates at high speed. The optimal values of these parameters will differ depending on what kind of cooling duct design you use. You will have to experiment. Important: if you are using Cura, you should disable its similar feature that scales fan speeds depending on layer number. The system used by this script is better because it uses a fixed Z height instead of counting layers that might have different heights.
 * `LEAD_TIME` is the number of seconds by which beep sequences should be moved forward in time. A sequence takes about 0.6 seconds to be played and detected, and the time needed to spin up the fan must also be considered, hence a value around 1 second should be reasonable, in my case 1.3 seconds seems optimal. Mind that this is done on a best-effort basis. The time will not always be exact because granularity depends on duration of print moves. If the last move before an original M106 command takes more than twice `LEAD_TIME`, the script will not be able to anticipate the beep sequence. The script can split up long moves to obtain a good lead time, this is the `--allow_split` option which is off by default. It is possible that enabling this option can cause visible artefacts, so there is a bit of a trade-off between cooling performance and surface quality.
@@ -201,7 +200,7 @@ Last but not least, if you previously neglected fan speed values in your slicer 
 
 There is still a reliability problem with my current setup, sometimes beepdetect.py seems to become deaf for a short period and I'm not sure if this is due to the cheap USB sound card, or a problem with audio recording on the Raspberry Pi in general.
 
-Another problem is that recent versions of the FFCP firmware always play a song whenever a heater has reached its target temperature. This was not the case in the original Sailfish firmware that came with my printer, it was introduced when I upgraded it through FlashPrint. I have always found this annoying and useless, but now it becomes a hazard because if this song is played exactly at the moment a sequence is being played, it will be interrupted and the fan will not change speed. I want to disable the playing of this song when a target temperature has been reached. If anyone knows how to do this without recompiling and flashing a custom Sailfish build, I'd like to know how!
+Another problem is that recent versions of Sailfish (the firmware used on the FFCP) always play a song whenever a heater has reached its target temperature. This was not the case in older versions, like the one that originally came with my printer. I have found this annoying and useless, but now it becomes a hazard because if this song is played exactly at the moment a sequence is being played, it will be interrupted and the fan will not change speed. There is unfortunately no way to disable this tune without recompiling Sailfish. I will try to make a pull request to have this as a toggle-able feature in some future Sailfish version.
 
 
 ### Disclaimer

@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 """
 Post-processing script that converts M106 commands into sequences of M300 beep commands that can
   be detected by the beepdetect.py running on a Raspberry Pi.
@@ -24,9 +24,7 @@ Released under Creative Commons Attribution 4.0 International license.
 #   is pointless due to inertia of the fan. (The last command in a 'burst' must always remain
 #   intact.)
 
-from __future__ import print_function
 import argparse
-import itertools
 import math
 import re
 import sys
@@ -148,10 +146,10 @@ class GCodeStreamer(object):
     def stop(self):
         """Output the rest of the buffers, and the rest of the file."""
         if self.timings:
-            for line, t in itertools.izip(self.buffer, self.buffer_times):
-                print(("{}; {:.3f}".format(line, t) if t else line), file=self.output)
-            for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
-                print(("{}; {:.3f}".format(line, t) if t else line), file=self.output)
+            for line, tval in zip(self.buffer, self.buffer_times):
+                print(("{}; {:.3f}".format(line, tval) if tval else line), file=self.output)
+            for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
+                print(("{}; {:.3f}".format(line, tval) if tval else line), file=self.output)
         else:
             for line in self.buffer:
                 print(line, file=self.output)
@@ -229,9 +227,10 @@ class GCodeStreamer(object):
             self.buffer.append(line)
             if self.timings:
                 while len(self.buffer) > self.max_buffer:
-                    l = self.buffer.popleft()
-                    t = self.buffer_times.popleft()
-                    print(("{}; {:.3f}".format(l, t) if t else l), file=self.output)
+                    old_l = self.buffer.popleft()
+                    old_t = self.buffer_times.popleft()
+                    print(("{}; {:.3f}".format(old_l, old_t) if old_t else old_l),
+                          file=self.output)
             else:
                 while len(self.buffer) > self.max_buffer:
                     print(self.buffer.popleft(), file=self.output)
@@ -299,7 +298,7 @@ class GCodeStreamer(object):
                 # Something interesting happened!
                 try:
                     # Top up buffer_ahead if necessary
-                    for _ in xrange(look_ahead - len(self.buffer_ahead)):
+                    for _ in range(look_ahead - len(self.buffer_ahead)):
                         self._read_next_line(True)
                 except (EOFError, EndOfPrint):
                     pass
@@ -321,7 +320,15 @@ class GCodeStreamer(object):
 
     def insert_buffer(self, pos, lines, replace=False):
         """Insert extra @lines before, or replace the existing line at index @pos."""
-        # This would probably be a one-liner (per buffer) in python 3.6
+        if len(lines) == 1:
+            if replace:
+                self.buffer[pos] = lines[0]
+                self.buffer_times[pos] = 0.0
+            else:
+                self.buffer.insert(pos, lines[0])
+                self.buffer_times.insert(pos, 0.0)
+            return
+
         new_buffer = deque()
         new_buffer_times = deque()
         for _ in range(pos):
@@ -376,7 +383,7 @@ class GCodeStreamer(object):
         as a list, or None if X or Y could not be found. This is an inefficient operation and
         should only be used when strictly necessary."""
         found_x, found_y = None, None
-        for i in reversed(range(position)):
+        for i in reversed(list(range(position))):
             x, y = GCodeStreamer.parse_xy(self.buffer[i])
             if x is not None:
                 found_x = x
@@ -442,11 +449,11 @@ class GCodeStreamer(object):
         given command(s) is encountered. If none is encountered, return -1.0."""
         time_total = 0.0
         found = False
-        for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
+        for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
             if line.startswith(commands):
                 found = True
                 break
-            time_total += t
+            time_total += tval
         return time_total if found else -1.0
 
     def drop_ahead_commands(self, commands):
@@ -456,10 +463,10 @@ class GCodeStreamer(object):
         # line is to be deleted, it is more efficient as well.
         cleaned = deque()
         cleaned_times = deque()
-        for line, t in itertools.izip(self.buffer_ahead, self.buffer_ahead_times):
+        for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
             if not line.startswith(commands):
                 cleaned.append(line)
-                cleaned_times.append(t)
+                cleaned_times.append(tval)
         self.buffer_ahead = cleaned
         self.buffer_ahead_times = cleaned_times
 
@@ -467,12 +474,12 @@ class GCodeStreamer(object):
     def speed_to_beep_sequence(speed):
         """Return a list with the indices of the beep frequencies that represent
         the given speed."""
-        quantized = int(round(float(speed) / 255 * (4**SEQUENCE_LENGTH - 1)))
+        quantized = int(round(speed / 255.0 * (4**SEQUENCE_LENGTH - 1)))
         sequence = deque()
         while quantized:
             quad = quantized % 4
             sequence.appendleft(quad)
-            quantized = (quantized - quad) / 4
+            quantized = (quantized - quad) // 4
         while len(sequence) < SEQUENCE_LENGTH:
             sequence.appendleft(0)
         return list(sequence)
@@ -491,8 +498,8 @@ class GCodeStreamer(object):
 
         commands = ["M300 S0 P200; {} -> sequence {}".format(
             comment, "".join([str(i) for i in sequence]))]
-        for i in xrange(len(sequence)):
-            commands.append("M300 S{} P20".format(SIGNAL_FREQS[sequence[i]]))
+        for i, freq_index in enumerate(sequence):
+            commands.append("M300 S{} P20".format(SIGNAL_FREQS[freq_index]))
             if i < len(sequence) - 1:
                 commands.append("M300 S0 P100")
         return commands + ["M300 S0 P200; end sequence"]
@@ -506,23 +513,23 @@ class GCodeStreamer(object):
         # TODO: could discern between speeding up and slowing down. For slow-down it is
         #   more acceptable to be too late than for speed-up.
         if t_elapsed > 1.25 * lead_time:
-            ok = False
+            found = False
             if t_next >= 0.75 * lead_time:
                 position += 1
                 print_debug("    Picked {:.3f}: OK :)".format(t_next))
-                ok = True
+                found = True
             elif allow_split:
                 # Split the move such that the second part gives us the last bit of time
                 # needed to reach lead_time
-                ok = self.split_move(position, lead_time - t_next)
-                if ok:
+                found = self.split_move(position, lead_time - t_next)
+                if found:
                     position += 1
                     print_debug(
                         "    Split move because neither {:.3f} nor {:.3f} is acceptable :P".format(
                             t_elapsed, t_next))
                 else:
                     print_debug("    Cannot split the move! :\\")
-            if not ok:
+            if not found:
                 if t_elapsed <= 2.0 * lead_time:
                     print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
                 else:
@@ -665,12 +672,14 @@ if no_process:
     gcode.stop()
     sys.exit(0)
 
-params = {}
-for arg in vars(args):
-    params[arg] = getattr(args, arg)
-params['allow_split'] = allow_split
-del(params['in_file'], params['out_file'])
-gcode.append_buffer(["; pwm_postprocessor.py version {}, parameters: {}".format(VERSION, params)])
+args_dict = vars(args)
+del(args_dict['in_file'], args_dict['out_file'])
+args_dict['allow_split'] = allow_split
+params = []
+for arg, value in sorted(iter(args_dict.items())):
+    params.append("{}={}".format(arg, value))
+gcode.append_buffer(["; pwm_postprocessor.py version {}; parameters: {}".format(
+    VERSION, ", ".join(params))])
 print_debug("=== End of start G-code reached, now beginning actual processing ===")
 
 current_fan_speed = 0.0  # Actual scaled speed. Assume fan always off at start.

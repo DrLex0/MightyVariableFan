@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 """
 A basic server that allows to control the PWM output pin through HTTP requests, also offering
   a crude web interface to manually control the PWM.
@@ -109,10 +109,12 @@ class PWMController(object):
         self.duty = duty
 
     def get_duty(self):
+        """Return current duty cycle."""
         return self.duty
 
     @staticmethod
     def shutdown():
+        """To be invoked when about to stop the server."""
         GPIO.cleanup()
 
 
@@ -142,6 +144,7 @@ class GpioServer(object):
         self.pwm.set_duty(self.duty)
 
     def shutdown_machine(self):
+        """Initiate a shutdown of the machine this script runs on."""
         # Prevent the beep detector from reviving the PWM (even though that would mean you're
         # shutting down the Pi while the printer is still working).
         self.override = True
@@ -199,6 +202,7 @@ class GpioServer(object):
 
     @staticmethod
     def needs_override():
+        """Returns the page to be shown if a request was ignored due to manual override."""
         return GpioServer.html(
             "Manual override in effect",
             "Ignoring this request because the server is in manual override mode, and \
@@ -206,11 +210,16 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
     @cherrypy.expose
     def index(self, basic=None):
+        """The main page."""
         return self.server_status(basic)
 
     @cherrypy.expose
+    #pylint: disable=invalid-name
     def setduty(self, d, manual=None, basic=None):
-        """@d must be a number between 0.0 and 100.0, where 0 is off and 100 is full power."""
+        """Sets the PWM duty cycle.
+        @d must be a number between 0.0 and 100.0, where 0 is off and 100 is full power.
+        @manual means this request has manual override authority.
+        If @basic, only a minimal status page is returned."""
         try:
             duty_value = float(d)
             if duty_value < 0 or duty_value > 100:
@@ -235,6 +244,7 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
     @cherrypy.expose
     def enable(self, manual=None, basic=None):
+        """Enables the PWM output, resuming any previously set duty cycle."""
         if self.override and not manual:
             return GpioServer.needs_override()
         if not self.active:
@@ -244,6 +254,7 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
     @cherrypy.expose
     def disable(self, manual=None, basic=None):
+        """Disables the PWM output."""
         if self.override and not manual:
             return GpioServer.needs_override()
         if self.active:
@@ -253,6 +264,7 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 
     @cherrypy.expose
     def man_override(self, enable):
+        """Enables or disables the manual override mode."""
         # Weird: this does NOT work with plain 'override' as path. Apparently this is somehow
         # hard-coded in CherryPy?
         self.override = True if enable and enable != "0" else False
