@@ -9,6 +9,6 @@ DETECT_LOG=/var/log/beepdetect.log
 [ -f "$SERVER_LOG" ] && mv -f "$SERVER_LOG" /tmp/old_pwm_server.log
 [ -f "$DETECT_LOG" ] && mv -f "$DETECT_LOG" /tmp/old_beepdetect.log
 
-nohup su -c /usr/local/bin/pwm_server.py pi 2>&1 > $SERVER_LOG &
+su pi -c 'nohup /usr/local/bin/pwm_server.py' 2>&1 > $SERVER_LOG &
 nohup nice -n -15 /usr/local/bin/beepdetect.py 2>&1 > $DETECT_LOG &
 

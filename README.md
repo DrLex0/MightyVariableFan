@@ -18,7 +18,7 @@ I have looked for sensible ways to implement PWM for the fan, in such a way that
 
 To make all this work, you need some minimal understanding of Linux, and at least basic electronics skills. Being able to solder might not be essential, but will make it much easier than trying to find ready-made components that will fit. Also, this has only been tested with Slic3r, and quite likely the post-processing script that generates the beep sequences will only work with Slic3r-generated G-code at this moment. Of course, the main reason why I have published this on GitHub is to make it easy for anyone to modify the code and commit updates to make it work with other slicer programs.
 
-Mind that this is still in an **experimental stage.** See the *Current Issues* section at the bottom.
+Mind that this is still in an **experimental stage.** See the *Current Issues* section at the bottom. This has only been tested with prints from the SD card, because I don't print through USB.
 
 
 ### How It Works

@@ -14,7 +14,6 @@ import os
 import random
 import string
 import subprocess
-import sys
 import time
 
 import cherrypy
@@ -143,22 +142,21 @@ class GpioServer(object):
         self.pwm.set_duty(self.duty)
 
     def shutdown_machine(self):
+        # Prevent the beep detector from reviving the PWM (even though that would mean you're
+        # shutting down the Pi while the printer is still working).
+        self.override = True
         # If I don't do this, something in RPi.GPIO hangs and causes a segfault in the end.
         self.pwm.set_duty(0)
-        pid = os.fork()
-        if pid == 0:
-            # Instead of invoking shutdown directly, do it via a script that forks and calls
-            # shutdown after a few seconds.
-            # Double fork to ensure this process is entirely detached from the parent.
-            subprocess.Popen(["/usr/local/bin/shutdownpi"], cwd="/")
-            sys.exit(0)
-        else:
-            cherrypy.engine.exit()
-            # For some reason, I must now kill CherryPy with extreme prejudice, otherwise it
-            # re-spawns itself and this delays the shutdown for more than 1 minute. It is ugly
-            # but it works. Better solutions are welcome!
-            time.sleep(.5)
-            sys.exit(0)
+        # Instead of invoking shutdown directly, do it via a script that forks and then invokes
+        # shutdown after a few seconds, so we still have time to return a response and do not
+        # need to try something awkward to make CherryPy commit seppuku.
+        subprocess.Popen(["/usr/local/bin/shutdownpi"], cwd="/")
+        # I tried invoking cherrypy.engine.exit() here. Bad idea: somehow it delays the stopping
+        # of the server compared to just waiting for the SIGHUP or SIGKILL.
+        return GpioServer.html(
+            "Shutdown initiated",
+            "The {} will now shut down. Wait at least 15 seconds before pulling the power!".format(
+                self.machine_name))
 
     def server_status(self, basic=None):
         """This is the main page that will be returned upon every normal successful request.
@@ -267,8 +265,11 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
         down, e.g. because a browser tries to prefetch a page or reloads it from history, a
         token is generated when loading this URL, and only if the URL is reinvoked with this
         token, will the shutdown be initiated."""
+        if self.shutdown_token == -1:
+            return GpioServer.html("Shutting down", "Shutdown already initiated!")
         if token:
             if token == self.shutdown_token:
+                self.shutdown_token = -1
                 return self.shutdown_machine()
             return GpioServer.html(
                 "Shutdown request ignored",
@@ -333,8 +334,12 @@ if __name__ == '__main__':
 
     # TODO: I might want to configure the server for production mode
     cherrypy.config.update({
-        'server.socket_port': args.port,
-        'server.socket_host': '0.0.0.0'
+        'global': {
+            'server.socket_port': args.port,
+            'server.socket_host': '0.0.0.0',
+            # Useful to auto-reload the server when the script is overwritten with a new version.
+            'engine.autoreload.on' : True
+        }
     })
     pwm_app_config = {
         "/": {
@@ -342,5 +347,10 @@ if __name__ == '__main__':
             'tools.staticdir.dir': args.static_dir
         }
     }
+    # Override the default handle_SIGHUP, which will restart CherryPy if receiving a SIGUP while
+    # running as daemon. Even though I spawn this script through nohup, somehow a SIGHUP still
+    # ends up being received when the shutdownpi script is invoked from within. (You don't want to
+    # know how much time I've wasted debugging this.)
+    cherrypy.engine.signal_handler.handlers['SIGHUP'] = cherrypy.engine.signal_handler.bus.exit
     cherrypy.engine.subscribe('stop', PWMController.shutdown)
     cherrypy.quickstart(GpioServer(args, ramp_up_test=True), '/', pwm_app_config)
