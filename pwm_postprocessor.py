@@ -52,8 +52,8 @@ LEAD_TIME = 1.3
 FEED_FACTOR = 60.0
 
 # Even though the Z axis has the same feed factor as the X and Y axes, its top speed is much
-# lower. On the FFCP the maximum Z feedrate is about 1100.
-FEED_LIMIT_Z = 1100.0
+# lower. On the FFCP the maximum Z feedrate should be 1170.
+FEED_LIMIT_Z = 1170.0
 
 #### End of defaults section ####
 

@@ -161,6 +161,9 @@ class DetectionState(object):
                 self.last_sig_end = self.time_index
                 return True
             t_since_last = self.time_index - self.last_sig_end
+            # FIXME: still too strict: nasty busy prints can cause the pause to stretch across *9* windows!
+            # I shouldn't worry about allowing 209ms pause because two consecutive sequences will have at
+            # least 400ms in between them. I must however allow a new sequence within less than 186ms after a reset.
             if t_since_last < 3 or t_since_last > 7:
                 # Should be between 70ms and 163ms: consider overlap due to detecting across 2
                 # successive windows, and allow reasonable stretch on playback of the silent
@@ -283,9 +286,14 @@ def start_detecting(audio, options):
     # TODO: make some basic logging handler so I don't need to call this all the time
     sys.stdout.flush()
 
+    # Also keep track of the halved signal frequencies. If there is a response at those
+    # frequencies that is at least nearly as strong as the signal frequency, then the signal
+    # frequency is probably a harmonic from a beep played at a lower frequency.
+    all_bins = SIG_BINS[:] + [i // 2 for i in SIG_BINS]
+    all_bin_indices = list(range(0, len(all_bins)))
     sig_bin_indices = list(range(0, len(SIG_BINS)))
-    empty_sig_bins = zeros(len(SIG_BINS))
-    last_sig_bins = empty_sig_bins[:]  # Ensure to copy by value, not reference
+    empty_bins = zeros(2 * len(all_bins))
+    last_bins = empty_bins[:]  # Ensure to copy by value, not reference
 
     detections = DetectionState(debug)
     last_peak = None
@@ -359,10 +367,10 @@ def start_detecting(audio, options):
 
         # See if one of our signal frequencies occurred. Sum responses over current and previous
         # windows, to get a more consistent intensity value even when beep spans two windows.
-        current_sig_bins = [intensity[SIG_BINS[i]] for i in sig_bin_indices]
-        total_sig_bins = list(map(add, last_sig_bins, current_sig_bins))
-        signals = [i for i in sig_bin_indices if total_sig_bins[i] > sensitivity]
-        last_sig_bins = current_sig_bins[:]
+        current_bins = [intensity[all_bins[i]] for i in all_bin_indices]
+        total_bins = list(map(add, last_bins, current_bins))
+        signals = [i for i in sig_bin_indices if total_bins[i] > sensitivity]
+        last_bins = current_bins[:]
 
         if len(signals) != 1:  # either 'silence' or multiple signals
             # If multiple occurred simultaneously, assume it is loud noise and treat as silence.
@@ -377,7 +385,7 @@ def start_detecting(audio, options):
             duty = detections.check_silence()
             if duty is None:  # Nothing interesting happened
                 continue
-            last_sig_bins = empty_sig_bins[:]
+            last_bins = empty_bins[:]
             if duty is not False and server_ip:
                 future_countdowns.append(request_countdown)
                 futures.append(
@@ -386,8 +394,14 @@ def start_detecting(audio, options):
                             server_ip, server_port, duty),
                         timeout=request_timeout))
         else:  # 1 signal
+            if total_bins[len(SIG_BINS) + signals[0]] > .7 * total_bins[signals[0]]:
+                if debug:
+                    print("Reset because apparent signal {} is actually a harmonic".format(
+                        signals[0]))
+                detections.reset()
+                continue
             if not detections.check_signal(signals[0]):
-                last_sig_bins = empty_sig_bins[:]
+                last_bins = empty_bins[:]
 
 
 def calibration(audio, options):
