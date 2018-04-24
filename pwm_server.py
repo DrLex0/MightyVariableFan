@@ -158,8 +158,9 @@ class GpioServer(object):
         # of the server compared to just waiting for the SIGHUP or SIGKILL.
         return GpioServer.html(
             "Shutdown initiated",
-            "The {} will now shut down. Wait at least 15 seconds before pulling the power!".format(
-                self.machine_name))
+            ("<p>The {} will now shut down.</p>".format(self.machine_name) +
+             "<p>Wait at least 15 seconds before pulling the power!</p>" +
+             "<p><a href='/'>Main page (in case you power on again)</a></p>"))
 
     def server_status(self, basic=None):
         """This is the main page that will be returned upon every normal successful request.
@@ -196,9 +197,10 @@ class GpioServer(object):
 
         return GpioServer.html(
             "PWM Server on {}".format(self.machine_name),
-            "PWM status: active = {}, duty cycle = <b>{:.2f}</b>, manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}{}".format(
-                active, self.duty, override, pwm_toggle, manual_toggle, " ".join(pwm_presets),
-                detector_warning, shutdown))
+            ("PWM status: active = {}, duty cycle = <b>{:.2f}</b>, ".format(active, self.duty) +
+             "manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}{}".format(
+                 override, pwm_toggle, manual_toggle, " ".join(pwm_presets), detector_warning,
+                 shutdown)))
 
     @staticmethod
     def needs_override():
@@ -229,8 +231,8 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
             # for 'invalid parameter value'.
             raise cherrypy.HTTPError(
                 422,
-                "Invalid value '{}' for d parameter: it must be a number between 0.0 and 100.0 ({})".format(
-                    d, err))
+                ("Invalid value '{}' for d parameter: ".format(d) +
+                 "it must be a number between 0.0 and 100.0 ({})".format(err)))
 
         if self.override and not manual:
             return GpioServer.needs_override()
@@ -278,22 +280,26 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
         token is generated when loading this URL, and only if the URL is reinvoked with this
         token, will the shutdown be initiated."""
         if self.shutdown_token == -1:
-            return GpioServer.html("Shutting down", "Shutdown already initiated!")
+            return GpioServer.html(
+                "Shutting down",
+                ("<p>Shutdown already initiated!</p>" +
+                 "<p><a href='/'>Main page (in case you power on again)</a></p>"))
         if token:
             if token == self.shutdown_token:
                 self.shutdown_token = -1
                 return self.shutdown_machine()
             return GpioServer.html(
                 "Shutdown request ignored",
-                "Invalid shutdown token. Your browser is probably trying to reload an old page.\
-<br><a href='/'>Return to main page.</a>")
+                ("<p>Invalid shutdown token. Your browser may be trying to reload an old page.</p>"
+                 + "<p><a href='/'>Return to main page</a></p>"))
         else:
             self.shutdown_token = "".join(
                 random.choice(string.ascii_lowercase + string.digits) for _ in range(16))
             return GpioServer.html(
                 "Confirm shutdown",
-                "Really shutdown the {}?&nbsp <a href='/shutdown?token={}'>Yes</a> <a href='/'>No!</a>".format(
-                    self.machine_name, self.shutdown_token))
+                ("<p>Really shutdown the {}?</p>".format(self.machine_name) +
+                 "<p><a href='/shutdown?token={}'>Yes</a>&nbsp; <a href='/'>No!</a></p>".format(
+                     self.shutdown_token)))
 
     @staticmethod
     def html(title, body):
