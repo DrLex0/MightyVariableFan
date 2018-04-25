@@ -32,6 +32,11 @@ Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 Released under Creative Commons Attribution 4.0 International license.
 """
 
+# TODO: revise detection algorithm to allow even sloppier beep playback. If two M300 commands
+#   within one sequence were stretched, it should still be deemed OK. To compensate for the extra
+#   sloppiness, there should be a more strict test on silence between the beeps. Maybe the
+#   continuous tone check should be enabled after all.
+
 
 import argparse
 import os

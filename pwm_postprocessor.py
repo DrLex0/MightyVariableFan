@@ -7,7 +7,7 @@ It can also handle scaling of the PWM values depending on Z coordinate, to compe
 Because M300 commands are timed pretty accurately (unlike M126 and M127 whose timing is sloppily
   anticipated based on the number of commands and not their duration), the script will try to
   shift them forward in time to compensate for the duration of the beep sequence and the time
-  needed to spin up the fan.
+  needed to spin up the fan. This allows accurate cooling even of tiny overhangs.
 This script assumes the fan commands are M106 (with an S argument) and M107. This will only be
   the case if you configure your slicer to output G-code for RepRap or another firmware that
   supports variable fan speed (I recommend to stick to RepRap because there are only minor
@@ -18,13 +18,20 @@ Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 Released under Creative Commons Attribution 4.0 International license.
 """
 
-# TODO: prevent look_ahead from skipping fan speed changes for single-line bridge moves!
-# TODO: if there are too many successive fan speed commands in too short time, then some should be
+# TODO: if there are too many successive fan speed commands in too short time, then some must be
 #   skipped in a smart manner. For instance, trying to reduce speed during only a second or less,
-#   is pointless due to inertia of the fan. (The last command in a 'burst' must always remain
-#   intact.)
+#   is pointless due to inertia of the fan. Moreover, if the tone buffer in Sailfish overflows,
+#   we lose the last sequences, which is very bad. There cannot be more than 20 beeps queued at a
+#   time. The last command in a 'burst' must always remain intact, if need be it can be delayed if
+#   it is a speed reduction.
+#   I could simulate the state of the beep buffer to be able to shove in a new sequence as soon as
+#   possible, but this would be unreliable anyway due to the sloppy time estimates. It is
+#   sufficient to keep track of the number of sequences currently buffered, this should not be more
+#   than 2 at any time because each sequence takes 7 beeps, hence 2 consume 14 slots in the buffer.
+#   Playing one sequence takes 667ms (+ possible margin for stretch).
 
 import argparse
+import logging
 import math
 import re
 import sys
@@ -80,11 +87,20 @@ SEQUENCE_LENGTH = 3
 #### End of configuration section ####
 
 
-VERSION = '0.1'
-debug = False
+VERSION = '0.2'
 
+# Number of lines in the buffers. More allows to cope with more detailed and faster prints, but
+# is slower and requires more memory to process. If you need more than 128, you're probably
+# printing pointlessly detailed objects at a speed where all details drown in ringing artefacts
+# anyway.
+BUFFER_SIZE = 128
+DEBUG = False
+
+LOG = logging.getLogger('pwm_postproc')
+LOG.setLevel(logging.INFO)
 
 class EndOfPrint(Exception):
+    """Signifies that we have seen END_MARKER during a read."""
     pass
 
 
@@ -93,33 +109,30 @@ class GCodeStreamer(object):
     keeping a buffer of the last read lines. When a new line is read and the buffer exceeds a
     certain size, the oldest line(s) will be popped from the buffer and sent to output."""
 
-    def __init__(self, config, output, max_buffer=96):
+    def __init__(self, config, out_stream, max_buffer=BUFFER_SIZE):
         """@max_buffer is the largest number of lines that will be kept in memory before
-        sending the oldest ones to output while reading new lines."""
+        sending the oldest ones to @out_stream while reading new lines."""
         self.in_file = config.in_file
         self.feed_factor = config.feed_factor
         self.feed_limit_z = config.feed_limit_z
-        self.timings = hasattr(config, 'timings')
+        self.print_times = hasattr(config, 'timings')
 
-        self.output = output
+        self.output = out_stream
         self.max_buffer = max_buffer
 
-        self.buffer = deque()
-        self.buffer_ahead = deque()
+        # Buffers contain tuples (line, z, fan_speed, time_estimate)
         # We're only interested in the duration of a small set of moves, but calculate the
         # duration of all moves anyway. Inefficient, but much saner than having to implement
-        # a backtracking algorithm.
-        self.buffer_times = deque()
-        self.buffer_ahead_times = deque()
-        # Start out with just any values. The fan should not be enabled anywhere near the first
-        # few commands in the print body anyway, hence time estimates are irrelevant there.
-        self.xyzf = [0.0, 0.0, 0.0, 1.0]
+        # a backtracking algorithm that calculates times on-the-fly.
+        self.buffer = deque()
+        self.buffer_ahead = deque()
+        # Represents the printer state seen in the last read line.
+        # f is feedrate, d is fan duty cycle.
+        self.xyzfd = [0.0, 0.0, 0.0, 1.0, 0.0]
         self.end_of_print = False
-        self.current_layer_z = None  # Not necessarily the same as xyzf[2]
-        self.current_target_speed = None  # Speed as seen in self.buffer
-        self.ahead_target_speed = None  # Speed as seen in buffer_ahead
         self.last_sequence = []
         self.m126_7_found = False
+        self.fan_override = None
 
     def start(self, replace_commands=None, replace_lines=None, replace_once=True):
         """Read the file and immediately output every line, until the end of the start G-code
@@ -145,20 +158,22 @@ class GCodeStreamer(object):
 
     def stop(self):
         """Output the rest of the buffers, and the rest of the file."""
-        if self.timings:
-            for line, tval in zip(self.buffer, self.buffer_times):
+        if self.print_times:
+            for data in self.buffer:
+                line = data[0]
+                tval = data[3]
                 print(("{}; {:.3f}".format(line, tval) if tval else line), file=self.output)
-            for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
+            for data in self.buffer_ahead:
+                line = data[0]
+                tval = data[3]
                 print(("{}; {:.3f}".format(line, tval) if tval else line), file=self.output)
         else:
-            for line in self.buffer:
-                print(line, file=self.output)
-            for line in self.buffer_ahead:
-                print(line, file=self.output)
+            for data in self.buffer:
+                print(data[0], file=self.output)
+            for data in self.buffer_ahead:
+                print(data[0], file=self.output)
         self.buffer.clear()
-        self.buffer_times.clear()
         self.buffer_ahead.clear()
-        self.buffer_ahead_times.clear()
         while True:
             line = self.in_file.readline()
             if not line:
@@ -166,7 +181,7 @@ class GCodeStreamer(object):
             print(line.rstrip("\r\n"), file=self.output)
 
     def _update_print_state(self, line):
-        """Update the state of print position and feedrate, and return an estimate of how
+        """Update the xyzfd state (except the d element), and return an estimate of how
         long this move takes. The estimate does not consider acceleration."""
         # I could try to capture this in one big awful regex, but doing it separately avoids being
         # locked into the output format of a specific slicer. I even allow "Z1.2 F321 X0.0 G1".
@@ -175,174 +190,212 @@ class GCodeStreamer(object):
         found_z = re.match(r"[^;]*Z(\d*\.?\d+)(\s|;|$)", line)
         found_f = re.match(r"[^;]*F(\d*\.?\d+)(\s|;|$)", line)
 
-        xyzf2 = list(self.xyzf)  # copy values, not reference
+        xyzfd2 = list(self.xyzfd)  # copy values, not reference
         if found_z:
-            xyzf2[2] = float(found_z.group(1))
             if found_x or found_y:
                 # Only vase mode print moves should combine X or Y move with Z change.
                 # TODO: strictly spoken we should read the layer height from the file's parameter
                 # section and use that as the threshold.
-                if xyzf2[2] >= self.current_layer_z + 0.2:
-                    self.current_layer_z = xyzf2[2]
+                new_z = float(found_z.group(1))
+                if new_z >= xyzfd2[2] + 0.2:
+                    xyzfd2[2] = float(new_z)
             else:
-                self.current_layer_z = float(xyzf2[2])
+                xyzfd2[2] = float(found_z.group(1))
 
         if found_x:
-            xyzf2[0] = float(found_x.group(1))
+            xyzfd2[0] = float(found_x.group(1))
         if found_y:
-            xyzf2[1] = float(found_y.group(1))
+            xyzfd2[1] = float(found_y.group(1))
         if found_f:
-            xyzf2[3] = float(found_f.group(1))
+            xyzfd2[3] = float(found_f.group(1))
 
+        # TODO: G4 command can be directly converted to time (but should be rare in actual prints)
+        # TODO: tool changes (should be assumed to take ridiculously long)
         time_estimate = 0.0
         # Assumption to simplify logic and calculations: Z component in a combined XYZ move has
         # a negligible time contribution compared to XY.
         if found_x or found_y:
-            time_estimate = (math.hypot(xyzf2[0] - self.xyzf[0], xyzf2[1] - self.xyzf[1]) *
-                             self.feed_factor / xyzf2[3])
+            time_estimate = (math.hypot(xyzfd2[0] - self.xyzfd[0], xyzfd2[1] - self.xyzfd[1]) *
+                             self.feed_factor / xyzfd2[3])
         elif found_z:
-            feedrate = min(xyzf2[3], self.feed_limit_z)
-            time_estimate = abs(xyzf2[2] - self.xyzf[2]) * self.feed_factor / feedrate
+            feedrate = min(xyzfd2[3], self.feed_limit_z)
+            time_estimate = abs(xyzfd2[2] - self.xyzfd[2]) * self.feed_factor / feedrate
         else:
             found_e = re.match(r"[^;]*E(-?\d*\.?\d+)(\s|;|$)", line)
             if found_e:  # retract move, luckily they're relative: no need to remember state
-                time_estimate = abs(float(found_e.group(1))) * self.feed_factor / xyzf2[3]
+                time_estimate = abs(float(found_e.group(1))) * self.feed_factor / xyzfd2[3]
 
-        self.xyzf = xyzf2
+        self.xyzfd = xyzfd2
         return time_estimate
 
     def _read_next_line(self, ahead=False):
-        """Read one line from the file and return it.
-        Internal state (layer height, vase mode print mode, fan speed, ...) will be updated
-        according to whatever interesting things happened inside the line.
-        If @ahead, the lines will be stored in buffer_ahead instead of the main buffer.
+        """Read one line from the file and append it to the main buffer,
+        or buffer_ahead if @ahead.
+        Each buffer item is a tuple (line, z, duty_cycle, time_estimate) with:
+            z = the layer Z coordinate for the line,
+            duty_cycle = the current fan duty cycle at the line as dictated by the slicer,
+            time_estimate = an estimate of how long execution of the line will take.
         If end of file is reached, raise EOFError. If END_MARKER is reached, raise EndOfPrint."""
+        if self.end_of_print:
+            raise EndOfPrint("End of print code reached")
+
         line = self.in_file.readline()
         if not line:
             raise EOFError("End of file reached")
         line = line.rstrip("\r\n")
-        if ahead:
-            self.buffer_ahead.append(line)
+
+        time_estimate = 0.0
+        duty_cycle = self.xyzfd[4]
+
+        if re.match(r"[^;]*G1(\s|;|$)", line):  # print or travel move
+            time_estimate = self._update_print_state(line)
+        elif re.match(r"(M126|M127)(\s|;|$)", line):
+            self.m126_7_found = True
+        elif line.startswith(END_MARKER):
+            self.end_of_print = True
         else:
-            self.buffer.append(line)
-            if self.timings:
+            # M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
+            # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
+            fan_command = re.match(r"(M106|M107)(\s+S(\d*\.?\d+)|\s|;|$)", line)
+            if fan_command:
+                # An M106 without S argument will be treated as M106 S0 or M107.
+                duty_cycle = 0.0
+                if fan_command.group(1) == "M106" and fan_command.group(3):
+                    duty_cycle = float(fan_command.group(3))
+            self.xyzfd[4] = duty_cycle
+
+        if ahead:
+            self.buffer_ahead.append((line, self.xyzfd[2], duty_cycle, time_estimate))
+        else:
+            self.buffer.append((line, self.xyzfd[2], duty_cycle, time_estimate))
+            if self.print_times:
                 while len(self.buffer) > self.max_buffer:
-                    old_l = self.buffer.popleft()
-                    old_t = self.buffer_times.popleft()
-                    print(("{}; {:.3f}".format(old_l, old_t) if old_t else old_l),
+                    old_data = self.buffer.popleft()
+                    old_line = old_data[0]
+                    old_time = old_data[3]
+                    print(("{}; {:.3f}".format(old_line, old_time) if old_time else old_line),
                           file=self.output)
             else:
                 while len(self.buffer) > self.max_buffer:
-                    print(self.buffer.popleft(), file=self.output)
-                    self.buffer_times.popleft()
+                    print(self.buffer.popleft()[0], file=self.output)
 
-        times = self.buffer_ahead_times if ahead else self.buffer_times
-        if line.startswith(END_MARKER):
-            self.end_of_print = True
-            times.append(0.0)
+        if self.end_of_print:
             raise EndOfPrint("End of print code reached")
 
-        if re.match(r"[^;]*G1(\s|;|$)", line):  # print or travel move
-            times.append(self._update_print_state(line))
-            return line
-
-        times.append(0.0)
-        # TODO: a G4 command can be directly converted to time (but should be rare in actual prints)
-        # TODO: tool changes (should be assumed to take ridiculously long)
-
-        # M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
-        # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
-        fan_command = re.match(r"(M106|M107)(\s+S(\d*\.?\d+)|\s|;|$)", line)
-        if fan_command:
-            speed = 0.0
-            # An M106 without S argument will be treated as M106 S0 or M107.
-            if fan_command.group(1) == "M106" and fan_command.group(3):
-                speed = float(fan_command.group(3))
-            self.ahead_target_speed = speed
-            if not ahead:
-                self.current_target_speed = speed
-            return line
-
-        if re.match(r"(M126|M127)(\s|;|$)", line):
-            self.m126_7_found = True
-        return line
-
     def _get_next_ahead(self):
-        """Move the next line from buffer_ahead to the regular buffer, and return it."""
-        line = self.buffer_ahead.popleft()
-        self.buffer.append(line)
-        self.buffer_times.append(self.buffer_ahead_times.popleft())
-        if line.startswith(("M106", "M107")):
-            self.current_target_speed = self.ahead_target_speed
-        return line
+        """Move the next line from buffer_ahead to the regular buffer.
+        If end of print is reached, raise EndOfPrint."""
+        self.buffer.append(self.buffer_ahead.popleft())
+        if not self.buffer_ahead and self.end_of_print:
+            # The line we just moved must be END_MARKER.
+            LOG.trace("EOP in _get_next_ahead, buffers: %d, %d",
+                      len(self.buffer), len(self.buffer_ahead))
+            raise EndOfPrint("End of print code reached")
+
+    def override_fan_speed(self, speed):
+        """Tell get_next_event that the fan speed for the last read line is @speed,
+        no matter what the buffer says."""
+        self.fan_override = speed
 
     def get_next_event(self, look_ahead=0):
         """Read lines from the file until something interesting is encountered. This can be:
         - an M106 or M107 command
         - a layer change (in case of vase mode prints, treat Z increase of 0.2 as layer change).
-        Return value is the interesting line.
         NOTE: the state of this GCodeStreamer will be updated according to all read lines, hence
           the state will include what was seen in the @look_ahead lines. This helps with slicer
           quirks like placing fan commands right before layer changes, or placing two fan
           commands immediately after each other. It also avoids confusing a Z-hop travel move
           with a layer change.
         If end of file is reached, raise EOFError. If END_MARKER is reached, raise EndOfPrint."""
-        if self.end_of_print:
-            raise EndOfPrint("End of print code reached")
+        if self.buffer:
+            last_z = self.buffer[-1][1]
+            if self.fan_override is None:
+                last_fan = self.buffer[-1][2]
+            else:
+                last_fan = self.fan_override
+                self.fan_override = None
+        else:
+            last_z = 0.0
+            last_fan = 0.0
 
-        last_z = self.current_layer_z
         while True:
-            line = self._get_next_ahead() if self.buffer_ahead else self._read_next_line()
-            apparent_layer_change = (self.current_layer_z != last_z)
-            if line.startswith(("M106", "M107")) or apparent_layer_change:
-                # Something interesting happened!
+            if self.buffer_ahead:
+                self._get_next_ahead()
+            else:
+                self._read_next_line()
+            LOG.trace("BUFFER: %s", self.buffer[-1])
+            apparent_layer_change = (self.buffer[-1][1] != last_z)
+            if apparent_layer_change or last_fan != self.buffer[-1][2]:
+                LOG.trace("  Z last %g -> now %g -> apparentLC? %s", last_z, self.buffer[-1][1],
+                          apparent_layer_change)
+                LOG.trace("  FAN last %g -> now %g", last_fan, self.buffer[-1][2])
+                # Something interesting (may have) happened!
                 try:
                     # Top up buffer_ahead if necessary
                     for _ in range(look_ahead - len(self.buffer_ahead)):
                         self._read_next_line(True)
                 except (EOFError, EndOfPrint):
                     pass
-                # Avoid treating Z-hop as event: check whether Z wasn't reverted during look_ahead
-                if look_ahead and apparent_layer_change and self.current_layer_z == last_z:
+                # Avoid treating Z-hop as event: check whether Z wasn't reverted
+                # in look_ahead after a few moves
+                if (apparent_layer_change and
+                        len(self.buffer_ahead) > 2 and self.buffer_ahead[2][1] == last_z):
                     continue
-                return line
+                break
+
+    def current_line(self):
+        """Returns the most recent line in the main buffer."""
+        return self.buffer[-1][0] if self.buffer else None
 
     def pop(self):
-        """Removes the last line from the buffer (i.e. the first one returned by the last
-        invocation of get_next_event), and returns it."""
-        self.buffer_times.pop()
-        return self.buffer.pop()
+        """Removes the last line from the main buffer, and returns it."""
+        return self.buffer.pop()[0]
 
-    def append_buffer(self, lines):
-        """Append the @lines at the end of the main buffer."""
-        self.buffer.extend(lines)
-        self.buffer_times.extend([0.0 for _ in range(len(lines))])
+    def append_buffer(self, lines, times=None):
+        """Append the @lines at the end of the main buffer.
+        The z and duty_cycle values will be set to None, the time_estimate values will
+        be set to @times if defined, or 0.0."""
+        if not times:
+            times = [0.0 for _ in range(len(lines))]
+        if DEBUG:
+            assert len(lines) == len(times)
 
-    def insert_buffer(self, pos, lines, replace=False):
-        """Insert extra @lines before, or replace the existing line at index @pos."""
+        last_z, last_s = (self.buffer[-1][1], self.buffer[-1][2]) if self.buffer else (0.0, 0.0)
+        self.buffer.extend([(line, last_z, last_s, tval) for line, tval in zip(lines, times)])
+
+    def insert_buffer(self, pos, lines, times=None, replace=False):
+        """Insert extra @lines before, or replace the existing line at index @pos.
+        The z and duty_cycle values will be set to those of the preceding line,
+        the time_estimate values will be set to @times if defined, or 0.0."""
+        if not self.buffer or pos >= len(self.buffer):
+            self.append_buffer(lines, times)
+            return
+
+        if not times:
+            times = [0.0 for _ in range(len(lines))]
+        if DEBUG:
+            assert len(lines) == len(times)
+        LOG.trace("TIMEFUCK: %s", times) #TRASHME
+
         if len(lines) == 1:
+            previous = self.buffer[pos] if (replace or pos == 0) else self.buffer[pos - 1]
+            data = [(line, previous[1], previous[2], tval) for line, tval in zip(lines, times)]
             if replace:
-                self.buffer[pos] = lines[0]
-                self.buffer_times[pos] = 0.0
+                self.buffer[pos] = data[0]
             else:
-                self.buffer.insert(pos, lines[0])
-                self.buffer_times.insert(pos, 0.0)
+                self.buffer.insert(pos, data[0])
             return
 
         new_buffer = deque()
-        new_buffer_times = deque()
         for _ in range(pos):
             new_buffer.append(self.buffer.popleft())
-            new_buffer_times.append(self.buffer_times.popleft())
+        previous = new_buffer[-1] if new_buffer else self.buffer[0]
         if replace:
             self.buffer.popleft()
-            self.buffer_times.popleft()
-        new_buffer.extend(lines)
-        new_buffer_times.extend([0.0 for _ in range(len(lines))])
+        new_buffer.extend([(line, previous[1], previous[2], tval)
+                           for line, tval in zip(lines, times)])
         new_buffer.extend(self.buffer)
-        new_buffer_times.extend(self.buffer_times)
         self.buffer = new_buffer
-        self.buffer_times = new_buffer_times
 
     @staticmethod
     def parse_xy(line):
@@ -384,7 +437,7 @@ class GCodeStreamer(object):
         should only be used when strictly necessary."""
         found_x, found_y = None, None
         for i in reversed(list(range(position))):
-            x, y = GCodeStreamer.parse_xy(self.buffer[i])
+            x, y = GCodeStreamer.parse_xy(self.buffer[i][0])
             if x is not None:
                 found_x = x
                 if found_y is not None:
@@ -409,12 +462,13 @@ class GCodeStreamer(object):
         if not start_xy:
             return False
 
-        fraction = 1.0 - (time2 / self.buffer_times[position])
-        if debug:
+        data = self.buffer[position]
+        fraction = 1.0 - (time2 / data[3])
+        if DEBUG:
             assert fraction > 0
-        time1 = fraction * self.buffer_times[position]
+        time1 = fraction * data[3]
 
-        end_xyzefc = GCodeStreamer.parse_xyzefc(self.buffer[position])
+        end_xyzefc = GCodeStreamer.parse_xyzefc(data[0])
         if end_xyzefc[0] is None and end_xyzefc[1] is None:
             return False
         if end_xyzefc[0] is None:
@@ -439,36 +493,8 @@ class GCodeStreamer(object):
         new_lines = ["G1{} X{:.3f} Y{:.3f}{}{}{}".format(zed, mid_x, mid_y, mid_e, feed, comment),
                      "G1 X{:.3f} Y{:.3f}{} ; split move for {:.2f}s extra lead time".format(
                          end_xyzefc[0], end_xyzefc[1], end_e, time2)]
-        self.insert_buffer(position, new_lines, True)
-        self.buffer_times[position] = time1
-        self.buffer_times[position + 1] = time2
+        self.insert_buffer(position, new_lines, [time1, time2], True)
         return True
-
-    def ahead_time_until(self, commands):
-        """Return the total time estimate for commands in the ahead buffer until any of the
-        given command(s) is encountered. If none is encountered, return -1.0."""
-        time_total = 0.0
-        found = False
-        for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
-            if line.startswith(commands):
-                found = True
-                break
-            time_total += tval
-        return time_total if found else -1.0
-
-    def drop_ahead_commands(self, commands):
-        """Remove lines starting with any of the given command(s) in the lookahead buffer.
-        @commands may be a string or a tuple of strings."""
-        # It is simpler to just copy the non-deleted lines to a new deque, and if more than one
-        # line is to be deleted, it is more efficient as well.
-        cleaned = deque()
-        cleaned_times = deque()
-        for line, tval in zip(self.buffer_ahead, self.buffer_ahead_times):
-            if not line.startswith(commands):
-                cleaned.append(line)
-                cleaned_times.append(tval)
-        self.buffer_ahead = cleaned
-        self.buffer_ahead_times = cleaned_times
 
     @staticmethod
     def speed_to_beep_sequence(speed):
@@ -508,15 +534,14 @@ class GCodeStreamer(object):
         """Try to pick the position between existing print moves to approximate lead_time as
         well as possible, given that @t_elapsed >= lead_time and @t_next < lead_time.
         If @allow_split, a move at @position may be split up to improve lead time."""
-        print_debug("    Backtrack: {:.3f} ~ {:.3f}; position {}".format(
-            t_next, t_elapsed, position))
+        LOG.debug("    Backtrack: %.3f ~ %.3f; position %d", t_next, t_elapsed, position)
         # TODO: could discern between speeding up and slowing down. For slow-down it is
         #   more acceptable to be too late than for speed-up.
         if t_elapsed > 1.25 * lead_time:
             found = False
             if t_next >= 0.75 * lead_time:
                 position += 1
-                print_debug("    Picked {:.3f}: OK :)".format(t_next))
+                LOG.debug("    Picked %.3f: OK :)", t_next)
                 found = True
             elif allow_split:
                 # Split the move such that the second part gives us the last bit of time
@@ -524,19 +549,18 @@ class GCodeStreamer(object):
                 found = self.split_move(position, lead_time - t_next)
                 if found:
                     position += 1
-                    print_debug(
-                        "    Split move because neither {:.3f} nor {:.3f} is acceptable :P".format(
-                            t_elapsed, t_next))
+                    LOG.debug("    Split move because neither %.3f nor %.3f is acceptable :P",
+                              t_elapsed, t_next)
                 else:
-                    print_debug("    Cannot split the move! :\\")
+                    LOG.debug("    Cannot split the move! :\\")
             if not found:
                 if t_elapsed <= 2.0 * lead_time:
-                    print_debug("    Picked {:.3f}: meh :/".format(t_elapsed))
+                    LOG.debug("    Picked %.3f: meh :/", t_elapsed)
                 else:
                     position += 1
-                    print_debug("    Picked {:.3f}: too late :(".format(t_next))
+                    LOG.debug("    Picked %.3f: too late :(", t_next)
         else:
-            print_debug("    Picked {:.3f}: good :D".format(t_elapsed))
+            LOG.debug("    Picked %.3f: good :D", t_elapsed)
         return position
 
     def inject_beep_sequence(self, speed, comment="", lead_time=0.0, allow_split=False):
@@ -555,51 +579,36 @@ class GCodeStreamer(object):
         t_elapsed = 0.0
         # next in the file but previous in the algorithm, since we're going backwards...
         t_next = 0.0
-        if debug:
-            assert len(self.buffer) == len(self.buffer_times)
-        position = len(self.buffer_times)
+        position = len(self.buffer)
         previous_sequence = False
-        for t in reversed(self.buffer_times):
-            position -= 1
-            t_next = t_elapsed
-            t_elapsed += t
-            if t_elapsed >= lead_time:
-                break
-            elif self.buffer[position] == "M300 S0 P200; end sequence":
+
+        for data in reversed(self.buffer):
+            if data[0] == "M300 S0 P200; end sequence":
                 # Ensure not to jump across previously inserted sequence: swapping commands
                 # would be bad!
                 previous_sequence = True
                 break
+            position -= 1
+            t_next = t_elapsed
+            t_elapsed += data[3]
+            if t_elapsed >= lead_time:
+                break
+
         if previous_sequence:
-            print_debug(
-                "  Cannot backtrack more than {:.3f}s due to previous sequence".format(t_next))
-            position += 1
+            LOG.debug("  Cannot backtrack more than %.3fs due to previous sequence", t_next)
         elif position == 0:
-            print_debug(
-                "Buffer too short to backtrack to lead time of {:.3f}s, it will only be {:.3f}s".format(
-                    lead_time, t_elapsed))
+            LOG.debug("Buffer too short to backtrack to lead time of %.3fs, it will only be %.3fs",
+                      lead_time, t_elapsed)
         else:
             position = self.optimize_lead_time(lead_time, position, t_elapsed, t_next, allow_split)
 
-        if position < len(self.buffer):
-            self.insert_buffer(position, commands)
-        else:
-            self.append_buffer(commands)
+        self.insert_buffer(position, commands)
         return True
 
 
-def print_debug(message):
-    if debug:
-        print(message, file=sys.stderr)
-
-def print_error(message):
-    print("ERROR: {}".format(message), file=sys.stderr)
-
-def print_warning(message):
-    print("WARNING: {}".format(message), file=sys.stderr)
-
-def ramp_up_scale(z):
-    return min(1.0, z * (1.0 - RAMP_UP_SCALE0) / RAMP_UP_ZMAX + RAMP_UP_SCALE0)
+def ramp_up_scale(layer_z, config):
+    """Calculate scale factor for fan speed at the lowest print layers."""
+    return min(1.0, layer_z * (1.0 - config.scale0) / args.zmax + config.scale0)
 
 
 parser = argparse.ArgumentParser(
@@ -614,13 +623,15 @@ parser.add_argument('in_file', type=argparse.FileType('r'),
 parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
                     help='optional file to write to (default is to print to standard output)')
 parser.add_argument('-a', '--allow_split', action='store_true',
-                    help='Allow splitting long moves to maintain correct lead time. This may cause visible seams.')
-parser.add_argument('-d', '--debug', action='store_true',
-                    help='enable debug output on stderr')
+                    help=('Allow splitting long moves to maintain correct lead time. ' +
+                          'This may cause visible seams.'))
+parser.add_argument('-d', '--debug', action='count',
+                    help='enable debug output on stderr, repeat for trace level output')
 parser.add_argument('-i', '--timings', action='store_true',
                     help='Append a comment with estimated nonzero time to each line')
 parser.add_argument('-P', '--no_process', action='store_true',
-                    help='Output the file without doing fan command processing, useful in combination with --timings')
+                    help=('Output the file without doing fan command processing, useful ' +
+                          'in combination with --timings'))
 parser.add_argument('-z', '--zmax', type=float,
                     help='Z coordinate below which fan speed will be linearly ramped up',
                     default=RAMP_UP_ZMAX)
@@ -639,11 +650,33 @@ parser.add_argument('-l', '--feed_limit_z', type=float,
 
 args = parser.parse_args()
 
-debug = hasattr(args, 'debug')
+DEBUG = hasattr(args, 'debug')
+TRACE = DEBUG and args.debug > 1
 allow_split = hasattr(args, 'allow_split')
 no_process = hasattr(args, 'no_process')
 
-print_debug("Debug output enabled, prepare to be spammed")
+LOG_TRACE_LEVEL = 9
+logging.addLevelName(LOG_TRACE_LEVEL, "TRACE")
+def trace(self, message, *args, **kws):
+    """Log at trace level: even more verbose than debug."""
+    if self.isEnabledFor(LOG_TRACE_LEVEL):
+        #pylint: disable=redefined-outer-name
+        self._log(LOG_TRACE_LEVEL, message, args, **kws)
+logging.Logger.trace = trace
+
+LOG_HANDLER = logging.StreamHandler(sys.stderr)
+LOG_LEVEL = None
+if TRACE:
+    LOG_LEVEL = LOG_TRACE_LEVEL
+elif DEBUG:
+    LOG_LEVEL = logging.DEBUG
+if LOG_LEVEL is not None:
+    LOG_HANDLER.setLevel(LOG_LEVEL)
+    LOG.setLevel(LOG_LEVEL)
+LOG_HANDLER.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+LOG.addHandler(LOG_HANDLER)
+LOG.debug("Debug output enabled, prepare to be spammed")
+LOG.trace("Trace output enabled, prepare to be thoroughly spammed")
 
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args, output)
@@ -657,15 +690,15 @@ try:
         if gcode.start(("M106", "M107"), off_commands):
             gcode.last_sequence = GCodeStreamer.speed_to_beep_sequence(0)
 except EOFError as err:
-    print_error(err)
+    LOG.error(err)
     sys.exit(1)
 
 if no_process:
     while True:
         try:
-            line = gcode.get_next_event()
+            gcode.get_next_event()
         except EOFError:
-            print_error("Unexpected end of file reached!")
+            LOG.error("Unexpected end of file reached!")
             sys.exit(1)
         except EndOfPrint:
             break
@@ -673,97 +706,123 @@ if no_process:
     sys.exit(0)
 
 args_dict = vars(args)
-del(args_dict['in_file'], args_dict['out_file'])
+del args_dict['in_file']
+if 'out_file' in args_dict:
+    del args_dict['out_file']
 args_dict['allow_split'] = allow_split
 params = []
 for arg, value in sorted(iter(args_dict.items())):
     params.append("{}={}".format(arg, value))
-gcode.append_buffer(["; pwm_postprocessor.py version {}; parameters: {}".format(
-    VERSION, ", ".join(params))])
-print_debug("=== End of start G-code reached, now beginning actual processing ===")
+print("; pwm_postprocessor.py version {}; parameters: {}".format(VERSION, ", ".join(params)),
+      file=output)
+LOG.debug("=== End of start G-code reached, now beginning actual processing ===")
 
-current_fan_speed = 0.0  # Actual scaled speed. Assume fan always off at start.
+set_fan_speed = 0.0  # Actual scaled speed. Assume fan always off at start.
+current_layer_z = 0.0
 while True:
     try:
-        # look_ahead must be at least:
-        #   2 to ignore Z-hop travel moves,
-        #   1 to ignore duplicate M106 commands,
-        #   2 to already be aware of changed Z in case of fan command followed by layer change,
-        #   3 to combine the previous two cases.
-        # This is again Slic3r-specific, it inserts M106 before changing the layer.
-        line = gcode.get_next_event(3)
+        gcode.get_next_event(BUFFER_SIZE)
     except EOFError:
-        print_error("Unexpected end of file reached!")
+        LOG.error("Unexpected end of file reached!")
         sys.exit(1)
     except EndOfPrint:
-        if current_fan_speed:
-            print_debug("End of print reached while fan still active: inserting off sequence")
+        if set_fan_speed:
+            LOG.debug("End of print reached while fan still active: inserting off sequence")
             gcode.append_buffer(off_commands)
         break
-    print_debug("Interesting line: {}".format(line))
+    current_line = gcode.current_line()
+    LOG.debug("Interesting line: %s", current_line)
 
     layer_change = False
-    if line.startswith(("M106", "M107")):
-        gcode.pop()  # Get rid of this invalid Sailfish command
-        print_debug("  -> Fan command")
-    elif gcode.ahead_target_speed is not None:
-        # Layer change while fan is active: check if we need to update fan speed
-        print_debug("  -> Layer change {}".format(gcode.current_layer_z))
+    current_data = gcode.buffer[-1]
+    original_speed = current_data[2]
+
+    # ahead_layer_z is used for ramp-up scale. Look ahead a few lines because a layer change
+    # may follow immediately after a fan command.
+    ahead_layer_z = gcode.buffer_ahead[2][1] if len(gcode.buffer_ahead) > 2 else current_data[1]
+    if current_layer_z != current_data[1]:
+        current_layer_z = current_data[1]
+        if current_data[2]:
+            # Layer change while fan is active: we'll see if fan speed needs change
+            LOG.debug("  -> Layer change %g", current_layer_z)
+        else:
+            LOG.debug("  -> Layer change %g, but fan is off", current_layer_z)
+            continue
         layer_change = True
     else:
-        print_debug("  -> Layer change {}, but fan is off".format(gcode.current_layer_z))
-        continue
+        # Must be a fan speed command
+        if DEBUG:
+            assert current_data[0].startswith(("M106", "M107"))
+        LOG.debug("  -> Fan command")
+        gcode.pop()  # Get rid of this invalid Sailfish command
+        # get_next_event relies on the last line to detect fan speed changes, but we've just
+        # wiped it, therefore override.
+        gcode.override_fan_speed(original_speed)
 
-    # Determine both the speed we would need to set according to this event and any speed
+    # Determine both the speed we would need to set according to this event, and any speed
     # command in the ahead buffer. Both will be scaled according to the (ahead) Z coordinate.
-    scale = ramp_up_scale(gcode.current_layer_z)
-    now_fan_speed = gcode.current_target_speed * scale
-    ahead_fan_speed = gcode.ahead_target_speed * scale
-    original_speed = gcode.current_target_speed
+    scale = ramp_up_scale(ahead_layer_z, args)
+    now_fan_speed = original_speed * scale
+    ahead_fan_time = 0.0
+    ahead_fan_speed = now_fan_speed
+    original_ahead_speed = original_speed
 
+    # No point looking ahead when we already know we're going to skip this command/Z change event
+    # because we're already at the required speed.
+    if now_fan_speed != set_fan_speed:
+        for data in gcode.buffer_ahead:
+            # Timing of layer-related fan speed changes is not important, therefore do not look
+            # for them.
+            if data[2] != original_speed:
+                next_scale = scale if data[1] == ahead_layer_z else ramp_up_scale(data[1], args)
+                ahead_fan_speed = data[2] * next_scale
+                original_ahead_speed = data[2]  # only for logging
+                break
+            ahead_fan_time += data[3]
+            if ahead_fan_time > 1.5:
+                # No use in looking further, 1.5s is enough to play any queued sequences, and
+                # too long to skip anything due to inertia of the fan.
+                break
+
+    LOG.trace("Ahead fan time = %.3f", ahead_fan_time)
+    # TODO: extend this. We must also avoid that more than 2 sequences are started within any
+    # time span of 1.33 seconds (take 1.5 for margin).
     if now_fan_speed != ahead_fan_speed:
         # Two commands (or layer change + command) very close to each other. See if we cannot
         # do anything smarter than what the slicer tries to make us do.
-        t_ahead = gcode.ahead_time_until(("M106", "M107"))
-        if debug:
-            assert t_ahead >= 0
-        if t_ahead < 0.1:
+        if ahead_fan_time < 0.04:
             # Either t == 0.0 because the slicer program suffered a fit of dementia and inserted
             # two speed changes with nothing in between them, or there is only one ridiculously
             # short move in between the commands and it is pointless to try to spin the fan up or
             # down just for that period. Immediately jump to the final speed.
-            # Mind that only one short bridge move can cause this scenario: if there are more
-            # moves, look_ahead won't see the ending M106 command even if the moves take less
-            # than 0.1s. This is good because cooling a short bridge move is useless, but cooling
-            # a sharp overhanging corner, even if it is tiny, is useful.
-            print_debug("  Replacing this speed change with {} that follows within 0.1s".format(
-                ahead_fan_speed))
+            # Considering a period of 40ms may seem overkill, but within that little time a sharp
+            # overhanging corner may be printed, and cooling certainly is useful for those.
+            LOG.debug("  Replacing this speed change with %g that follows within 40ms",
+                      ahead_fan_speed)
             now_fan_speed = ahead_fan_speed
-            original_speed = gcode.ahead_target_speed
-            # optimization: avoid triggering another event for the command we already handled
-            gcode.drop_ahead_commands(("M106", "M107"))
-            gcode.current_target_speed = gcode.ahead_target_speed
-        elif (now_fan_speed < current_fan_speed and now_fan_speed < ahead_fan_speed
-              and t_ahead < 1.5):
-            # It is pointless to try to spin down the fan for such a short time due to inertia.
-            if ahead_fan_speed <= current_fan_speed:
-                # Either we're maintaining speed or slowing down: set ahead as target speed
-                print_debug(
-                    "  No use slowing down for {:.2f}s, advance to upcoming speed {}".format(
-                        t_ahead, ahead_fan_speed))
+            original_speed = original_ahead_speed  # for logging
+            # I could drop the ahead command here, but it is probably more efficient to just
+            # stay within the flow of the algorithm.
+        elif (now_fan_speed < set_fan_speed or now_fan_speed < ahead_fan_speed
+              and ahead_fan_time < 1.5):
+            # It is pointless to try to spin down the fan for such a short time due to inertia,
+            # also going to an intermediate speed for such a short time is overkill.
+            if ahead_fan_speed <= set_fan_speed or now_fan_speed <= ahead_fan_speed:
+                # If next speed is the same or lower as previous, or higher than the wanted speed,
+                # immediately go to ahead speed.
+                LOG.debug(
+                    "  Slower speed for %.3fs not useful, advance to upcoming speed %g",
+                    ahead_fan_time, ahead_fan_speed)
                 now_fan_speed = ahead_fan_speed
-                original_speed = gcode.ahead_target_speed
-                gcode.drop_ahead_commands(("M106", "M107"))  # optimization
-                gcode.current_target_speed = gcode.ahead_target_speed
+                original_speed = original_ahead_speed  # for logging
             else:
-                # We'll be speeding up: just maintain current speed and ignore this event entirely
-                print_debug(
-                    "  No use slowing down for {:.2f}s before upcoming speed-up, skip".format(
-                        t_ahead))
+                # Either we'll be speeding up or slowing down in two stages: just maintain
+                # current speed and ignore this event entirely.
+                LOG.debug("  No use slowing down a bit for %.3fs, skip", ahead_fan_time)
                 continue
 
-    if now_fan_speed == current_fan_speed:
-        print_debug("    -> already at required speed {}".format(current_fan_speed))
+    if now_fan_speed == set_fan_speed:
+        LOG.debug("    -> already at required speed %g", set_fan_speed)
         continue
 
     if now_fan_speed:
@@ -773,24 +832,27 @@ while True:
         comment = "fan off"
     if layer_change:
         comment += " (layer change)"
-    # Do not move the final M107 forward, to maximize cooling of spiky things. Again rely
-    # on look_ahead (will fail if there is filament-specific end code).
+    # When we're near the end of the print (end marker has been seen in look_ahead), no longer
+    # move fan off commands forward, to maximize cooling of spiky things. This is especially true
+    # for the final M107 command right before the end marker.
     if gcode.end_of_print and not now_fan_speed:
         lead = 0.0
         comment += ", no backtrack"
     else:
         lead = args.lead_time
-    print_debug("    -> set {}".format(comment))
+    LOG.debug("    -> set %s", comment)
 
     # No point in trying to get perfect timing on a fan speed update due to layer change.
     split_it = False if layer_change else allow_split
     if not gcode.inject_beep_sequence(now_fan_speed, comment, lead, split_it):
-        print_debug("      but sequence is same as before, hence skip")
-    current_fan_speed = now_fan_speed
+        LOG.debug("      but sequence is same as before, hence skip")
+    set_fan_speed = now_fan_speed
 
 gcode.stop()
 
 if gcode.m126_7_found:
-    print_warning("M126 and/or M127 command(s) were found inside the body of the G-code. \
+    # I might offer a fallback mode that treats those commands as M106 with a default speed.
+    # This should be explicitly enabled via a CLI argument, otherwise this warning must appear.
+    LOG.warning("WARNING: M126 and/or M127 command(s) were found inside the body of the G-code. \
 Most likely, your fan will not work for this print. Are you sure your slicer is outputting \
 G-code with M106 commands (e.g. RepRap G-code flavor)?")
