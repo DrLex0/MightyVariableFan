@@ -96,6 +96,10 @@ VERSION = '0.2'
 BUFFER_SIZE = 128
 DEBUG = False
 
+# Multiply exact value with a margin to cater for possible stretching of the played beeps, as well
+# as the fact that we're not considering acceleration when estimating times.
+SEQUENCE_DURATION = 1.2 * (0.4 + SEQUENCE_LENGTH * 0.02 + (SEQUENCE_LENGTH - 1) * 0.1)
+
 LOG = logging.getLogger('pwm_postproc')
 LOG.setLevel(logging.INFO)
 
@@ -130,9 +134,12 @@ class GCodeStreamer(object):
         # f is feedrate, d is fan duty cycle.
         self.xyzfd = [0.0, 0.0, 0.0, 1.0, 0.0]
         self.end_of_print = False
-        self.last_sequence = []
         self.m126_7_found = False
         self.fan_override = None
+
+        self.sequences_busy = 0
+        self.sequence_time_left = 0.0
+        self.seq_postponed = False
 
     def start(self, replace_commands=None, replace_lines=None, replace_once=True):
         """Read the file and immediately output every line, until the end of the start G-code
@@ -324,12 +331,37 @@ class GCodeStreamer(object):
             else:
                 self._read_next_line()
             LOG.trace("BUFFER: %s", self.buffer[-1])
+
+            fan_command = False
+            if last_fan != self.buffer[-1][2]:
+                fan_command = True
+                if self.seq_postponed:
+                    # A new fan speed change makes any pending postponed one obsolete
+                    LOG.trace("  Dropping postponed event")
+                    self.seq_postponed = False
+
             apparent_layer_change = (self.buffer[-1][1] != last_z)
-            if apparent_layer_change or last_fan != self.buffer[-1][2]:
+
+            postponed_event = False
+            if self.sequences_busy:
+                self.sequence_time_left -= self.buffer[-1][3]
+                if self.sequence_time_left <= 0:
+                    self.sequences_busy -= 1
+                    LOG.trace("  Sequence finished playing, left to play: %d", self.sequences_busy)
+                    if self.sequences_busy:
+                        self.sequence_time_left += SEQUENCE_DURATION
+                    if self.seq_postponed:
+                        LOG.trace("  Triggering postponed event")
+                        postponed_event = True
+                        self.seq_postponed = False
+                        # Disable the continue check for Z-hop down below
+                        apparent_layer_change = False
+
+            if fan_command or apparent_layer_change or postponed_event:
+                # Something interesting (may have) happened!
                 LOG.trace("  Z last %g -> now %g -> apparentLC? %s", last_z, self.buffer[-1][1],
                           apparent_layer_change)
                 LOG.trace("  FAN last %g -> now %g", last_fan, self.buffer[-1][2])
-                # Something interesting (may have) happened!
                 try:
                     # Top up buffer_ahead if necessary
                     for _ in range(look_ahead - len(self.buffer_ahead)):
@@ -340,8 +372,30 @@ class GCodeStreamer(object):
                 # in look_ahead after a few moves
                 if (apparent_layer_change and
                         len(self.buffer_ahead) > 2 and self.buffer_ahead[2][1] == last_z):
+                    LOG.trace("  No layer change: Z-hop")
                     continue
+                if postponed_event:
+                    # Insert marker so the main program knows this is a postponed event. Clone
+                    # Z and fan speed values from the current line to allow reusing logic.
+                    self.buffer.append(("POSTPONED",) + self.buffer[-1][1:3] + (0.0,))
                 break
+
+    def the_end_is_near(self, how_near=0):
+        """Returns whether END_MARKER is in the first @how_near lines of the ahead buffer.
+        If @how_near is zero, it defaults to BUFFER_SIZE/8."""
+        if not self.end_of_print:
+            # We haven't even read the line yet!
+            return False
+        if self.buffer and self.buffer[-1][0].startswith(END_MARKER):
+            return True
+
+        if not how_near:
+            how_near = BUFFER_SIZE // 8
+        for _, data in zip(range(how_near), self.buffer_ahead):
+            if data[0].startswith(END_MARKER):
+                LOG.trace("  The End Is Near!")
+                return True
+        return False
 
     def current_line(self):
         """Returns the most recent line in the main buffer."""
@@ -375,7 +429,6 @@ class GCodeStreamer(object):
             times = [0.0 for _ in range(len(lines))]
         if DEBUG:
             assert len(lines) == len(times)
-        LOG.trace("TIMEFUCK: %s", times) #TRASHME
 
         if len(lines) == 1:
             previous = self.buffer[pos] if (replace or pos == 0) else self.buffer[pos - 1]
@@ -497,7 +550,7 @@ class GCodeStreamer(object):
         return True
 
     @staticmethod
-    def speed_to_beep_sequence(speed):
+    def speed_to_sequence(speed):
         """Return a list with the indices of the beep frequencies that represent
         the given speed."""
         quantized = int(round(speed / 255.0 * (4**SEQUENCE_LENGTH - 1)))
@@ -510,18 +563,10 @@ class GCodeStreamer(object):
             sequence.appendleft(0)
         return list(sequence)
 
-    def speed_to_m300_commands(self, speed, comment="", skip_repeat=True):
+    def sequence_to_m300_commands(self, sequence, comment=""):
         """Return a list with commands to play a sequence that can be detected by beepdetect.py.
-        @speed is a float value between 0.0 and 255.0.
-        @comment will be inserted with the commands.
-        If @skip_repeat, return an empty list if the sequence is the same as in the previous
-        invocation with @skip_repeat."""
-        sequence = GCodeStreamer.speed_to_beep_sequence(speed)
-        if skip_repeat:
-            if sequence == self.last_sequence:
-                return []
-            self.last_sequence = sequence
-
+        @sequence is a list with indices in the SIGNAL_FREQS array.
+        @comment will be inserted with the commands."""
         commands = ["M300 S0 P200; {} -> sequence {}".format(
             comment, "".join([str(i) for i in sequence]))]
         for i, freq_index in enumerate(sequence):
@@ -533,15 +578,17 @@ class GCodeStreamer(object):
     def optimize_lead_time(self, lead_time, position, t_elapsed, t_next, allow_split):
         """Try to pick the position between existing print moves to approximate lead_time as
         well as possible, given that @t_elapsed >= lead_time and @t_next < lead_time.
-        If @allow_split, a move at @position may be split up to improve lead time."""
+        If @allow_split, a move at @position may be split up to improve lead time.
+        Returns a tuple of the best index in the buffer and the chosen lead time."""
         LOG.debug("    Backtrack: %.3f ~ %.3f; position %d", t_next, t_elapsed, position)
-        # TODO: could discern between speeding up and slowing down. For slow-down it is
+        # Could discern between speeding up and slowing down. For slow-down it is
         #   more acceptable to be too late than for speed-up.
         if t_elapsed > 1.25 * lead_time:
             found = False
             if t_next >= 0.75 * lead_time:
                 position += 1
                 LOG.debug("    Picked %.3f: OK :)", t_next)
+                t_elapsed = t_next
                 found = True
             elif allow_split:
                 # Split the move such that the second part gives us the last bit of time
@@ -551,30 +598,32 @@ class GCodeStreamer(object):
                     position += 1
                     LOG.debug("    Split move because neither %.3f nor %.3f is acceptable :P",
                               t_elapsed, t_next)
+                    t_elapsed = t_next + lead_time
                 else:
                     LOG.debug("    Cannot split the move! :\\")
+
             if not found:
                 if t_elapsed <= 2.0 * lead_time:
                     LOG.debug("    Picked %.3f: meh :/", t_elapsed)
                 else:
                     position += 1
                     LOG.debug("    Picked %.3f: too late :(", t_next)
+                    t_elapsed = t_next
         else:
             LOG.debug("    Picked %.3f: good :D", t_elapsed)
-        return position
 
-    def inject_beep_sequence(self, speed, comment="", lead_time=0.0, allow_split=False):
-        """Insert the beep sequence representing @speed into the gcode, with @comment added.
+        return position, t_elapsed
+
+    def inject_beep_sequence(self, sequence, comment="", lead_time=0.0, allow_split=False):
+        """Insert the beep @sequence into the gcode, with @comment added.
         The position of the sequence will be chosen such that it leads the last line in the
         buffer by an approximate @lead_time seconds.
+        Return value is the actual lead time that could be achieved.
         If @allow_split, long moves may be split to obtain a more accurate lead_time."""
-        commands = self.speed_to_m300_commands(speed, comment)
-        if not commands:
-            return False
-
+        commands = self.sequence_to_m300_commands(sequence, comment)
         if not lead_time:
             self.append_buffer(commands)
-            return True
+            return 0.0
 
         t_elapsed = 0.0
         # next in the file but previous in the algorithm, since we're going backwards...
@@ -594,16 +643,17 @@ class GCodeStreamer(object):
             if t_elapsed >= lead_time:
                 break
 
+        actual_time = t_elapsed
         if previous_sequence:
-            LOG.debug("  Cannot backtrack more than %.3fs due to previous sequence", t_next)
+            LOG.debug("  Cannot backtrack more than %.3fs due to previous sequence", t_elapsed)
         elif position == 0:
             LOG.debug("Buffer too short to backtrack to lead time of %.3fs, it will only be %.3fs",
                       lead_time, t_elapsed)
         else:
-            position = self.optimize_lead_time(lead_time, position, t_elapsed, t_next, allow_split)
-
+            position, actual_time = self.optimize_lead_time(lead_time, position, t_elapsed,
+                                                            t_next, allow_split)
         self.insert_buffer(position, commands)
-        return True
+        return actual_time
 
 
 def ramp_up_scale(layer_z, config):
@@ -680,7 +730,10 @@ LOG.trace("Trace output enabled, prepare to be thoroughly spammed")
 
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args, output)
-off_commands = gcode.speed_to_m300_commands(0.0, "fan off", skip_repeat=False)
+off_sequence = GCodeStreamer.speed_to_sequence(0.0)
+off_commands = gcode.sequence_to_m300_commands(off_sequence, "fan off")
+last_sequence = []
+
 try:
     if no_process:
         gcode.start()
@@ -688,7 +741,7 @@ try:
         # Assumption: anything before the end of the start G-code will only contain 'fan off'
         # instructions, either using M107, or M106 S0.
         if gcode.start(("M106", "M107"), off_commands):
-            gcode.last_sequence = GCodeStreamer.speed_to_beep_sequence(0)
+            last_sequence = off_sequence
 except EOFError as err:
     LOG.error(err)
     sys.exit(1)
@@ -730,26 +783,28 @@ while True:
             LOG.debug("End of print reached while fan still active: inserting off sequence")
             gcode.append_buffer(off_commands)
         break
-    current_line = gcode.current_line()
-    LOG.debug("Interesting line: %s", current_line)
+    LOG.debug("Interesting line: %s", gcode.current_line())
 
     layer_change = False
+    is_postponed = False
     current_data = gcode.buffer[-1]
     original_speed = current_data[2]
 
     # ahead_layer_z is used for ramp-up scale. Look ahead a few lines because a layer change
     # may follow immediately after a fan command.
     ahead_layer_z = gcode.buffer_ahead[2][1] if len(gcode.buffer_ahead) > 2 else current_data[1]
-    if current_layer_z != current_data[1]:
-        current_layer_z = current_data[1]
-        if current_data[2]:
-            # Layer change while fan is active: we'll see if fan speed needs change
-            LOG.debug("  -> Layer change %g", current_layer_z)
-        else:
-            LOG.debug("  -> Layer change %g, but fan is off", current_layer_z)
-            continue
-        layer_change = True
-    else:
+
+    if current_data[0] == "POSTPONED":
+        LOG.debug("  -> Postponed fan speed change")
+        is_postponed = True
+        gcode.pop()
+        # The postponed command may have caused a layer change to be ignored. Ensure our state is
+        # up-to-date (take minimum value to avoid being fooled by Z-hop).
+        current_layer_z = min(current_data[1], ahead_layer_z)
+        # Note: if we're unlucky, ahead_layer_z may have been picked on a Z-hop. The probability
+        # of a postponed event is small to begin with, the risk of then being on a Z-hop is tiny,
+        # and the consequences are minor. Therefore I won't waste CPU and sanity on it.
+    elif current_layer_z == current_data[1]:
         # Must be a fan speed command
         if DEBUG:
             assert current_data[0].startswith(("M106", "M107"))
@@ -758,6 +813,16 @@ while True:
         # get_next_event relies on the last line to detect fan speed changes, but we've just
         # wiped it, therefore override.
         gcode.override_fan_speed(original_speed)
+    else:
+        # Layer change
+        current_layer_z = current_data[1]
+        if current_data[2]:
+            # Layer change while fan is active: we'll see if fan speed needs change
+            LOG.debug("  -> Layer change %g", current_layer_z)
+        else:
+            LOG.debug("  -> Layer change %g, but fan is off", current_layer_z)
+            continue
+        layer_change = True
 
     # Determine both the speed we would need to set according to this event, and any speed
     # command in the ahead buffer. Both will be scaled according to the (ahead) Z coordinate.
@@ -785,8 +850,6 @@ while True:
                 break
 
     LOG.trace("Ahead fan time = %.3f", ahead_fan_time)
-    # TODO: extend this. We must also avoid that more than 2 sequences are started within any
-    # time span of 1.33 seconds (take 1.5 for margin).
     if now_fan_speed != ahead_fan_speed:
         # Two commands (or layer change + command) very close to each other. See if we cannot
         # do anything smarter than what the slicer tries to make us do.
@@ -824,6 +887,15 @@ while True:
     if now_fan_speed == set_fan_speed:
         LOG.debug("    -> already at required speed %g", set_fan_speed)
         continue
+    now_sequence = GCodeStreamer.speed_to_sequence(now_fan_speed)
+    if now_sequence == last_sequence:
+        LOG.debug("    -> sequence for new speed %g is same as before, skip", set_fan_speed)
+        continue
+
+    if gcode.sequences_busy >= 2:
+        LOG.debug("    -> !!! Too many sequences queued. Postponing.")
+        gcode.seq_postponed = True
+        continue
 
     if now_fan_speed:
         scaled = " scaled {:.3f}".format(scale) if scale < 1.0 else ""
@@ -832,21 +904,29 @@ while True:
         comment = "fan off"
     if layer_change:
         comment += " (layer change)"
-    # When we're near the end of the print (end marker has been seen in look_ahead), no longer
-    # move fan off commands forward, to maximize cooling of spiky things. This is especially true
-    # for the final M107 command right before the end marker.
-    if gcode.end_of_print and not now_fan_speed:
+    # When we're near the end of the print, no longer move fan off commands forward, to maximize
+    # cooling of spiky things. This is especially true for the final M107 command right before
+    # the end marker.
+    if gcode.the_end_is_near(16) and not now_fan_speed:
         lead = 0.0
         comment += ", no backtrack"
+    elif is_postponed:
+        # Counteract the allowed margin on lead_time such that the sequence cannot start playing
+        # sooner than necessary to offer enough space in the tune buffer.
+        lead = args.lead_time / 2
     else:
         lead = args.lead_time
     LOG.debug("    -> set %s", comment)
 
     # No point in trying to get perfect timing on a fan speed update due to layer change.
     split_it = False if layer_change else allow_split
-    if not gcode.inject_beep_sequence(now_fan_speed, comment, lead, split_it):
-        LOG.debug("      but sequence is same as before, hence skip")
+    actual_lead_time = gcode.inject_beep_sequence(now_sequence, comment, lead, split_it)
+
     set_fan_speed = now_fan_speed
+    last_sequence = now_sequence
+    if not gcode.sequences_busy:
+        gcode.sequence_time_left = SEQUENCE_DURATION + (lead - actual_lead_time)
+    gcode.sequences_busy += 1
 
 gcode.stop()
 
