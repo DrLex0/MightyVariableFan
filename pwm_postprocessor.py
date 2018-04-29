@@ -18,18 +18,6 @@ Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 Released under Creative Commons Attribution 4.0 International license.
 """
 
-# TODO: if there are too many successive fan speed commands in too short time, then some must be
-#   skipped in a smart manner. For instance, trying to reduce speed during only a second or less,
-#   is pointless due to inertia of the fan. Moreover, if the tone buffer in Sailfish overflows,
-#   we lose the last sequences, which is very bad. There cannot be more than 20 beeps queued at a
-#   time. The last command in a 'burst' must always remain intact, if need be it can be delayed if
-#   it is a speed reduction.
-#   I could simulate the state of the beep buffer to be able to shove in a new sequence as soon as
-#   possible, but this would be unreliable anyway due to the sloppy time estimates. It is
-#   sufficient to keep track of the number of sequences currently buffered, this should not be more
-#   than 2 at any time because each sequence takes 7 beeps, hence 2 consume 14 slots in the buffer.
-#   Playing one sequence takes 667ms (+ possible margin for stretch).
-
 import argparse
 import logging
 import math
@@ -563,7 +551,8 @@ class GCodeStreamer(object):
             sequence.appendleft(0)
         return list(sequence)
 
-    def sequence_to_m300_commands(self, sequence, comment=""):
+    @staticmethod
+    def sequence_to_m300_commands(sequence, comment=""):
         """Return a list with commands to play a sequence that can be detected by beepdetect.py.
         @sequence is a list with indices in the SIGNAL_FREQS array.
         @comment will be inserted with the commands."""
@@ -620,7 +609,7 @@ class GCodeStreamer(object):
         buffer by an approximate @lead_time seconds.
         Return value is the actual lead time that could be achieved.
         If @allow_split, long moves may be split to obtain a more accurate lead_time."""
-        commands = self.sequence_to_m300_commands(sequence, comment)
+        commands = GCodeStreamer.sequence_to_m300_commands(sequence, comment)
         if not lead_time:
             self.append_buffer(commands)
             return 0.0
@@ -658,7 +647,7 @@ class GCodeStreamer(object):
 
 def ramp_up_scale(layer_z, config):
     """Calculate scale factor for fan speed at the lowest print layers."""
-    return min(1.0, layer_z * (1.0 - config.scale0) / args.zmax + config.scale0)
+    return min(1.0, layer_z * (1.0 - config.scale0) / config.zmax + config.scale0)
 
 
 parser = argparse.ArgumentParser(
@@ -705,19 +694,19 @@ TRACE = DEBUG and args.debug > 1
 allow_split = hasattr(args, 'allow_split')
 no_process = hasattr(args, 'no_process')
 
-LOG_TRACE_LEVEL = 9
-logging.addLevelName(LOG_TRACE_LEVEL, "TRACE")
-def trace(self, message, *args, **kws):
+logging.TRACE = 9
+logging.addLevelName(logging.TRACE, "TRACE")
+def trace(self, message, *arguments, **kws):
     """Log at trace level: even more verbose than debug."""
-    if self.isEnabledFor(LOG_TRACE_LEVEL):
-        #pylint: disable=redefined-outer-name
-        self._log(LOG_TRACE_LEVEL, message, args, **kws)
+    if self.isEnabledFor(logging.TRACE):
+        #pylint: disable=redefined-outer-name,protected-access
+        self._log(logging.TRACE, message, arguments, **kws)
 logging.Logger.trace = trace
 
 LOG_HANDLER = logging.StreamHandler(sys.stderr)
 LOG_LEVEL = None
 if TRACE:
-    LOG_LEVEL = LOG_TRACE_LEVEL
+    LOG_LEVEL = logging.TRACE
 elif DEBUG:
     LOG_LEVEL = logging.DEBUG
 if LOG_LEVEL is not None:
@@ -731,7 +720,7 @@ LOG.trace("Trace output enabled, prepare to be thoroughly spammed")
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args, output)
 off_sequence = GCodeStreamer.speed_to_sequence(0.0)
-off_commands = gcode.sequence_to_m300_commands(off_sequence, "fan off")
+off_commands = GCodeStreamer.sequence_to_m300_commands(off_sequence, "fan off")
 last_sequence = []
 
 try:
