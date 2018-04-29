@@ -145,7 +145,7 @@ class DetectionState(object):
     def check_signal(self, signal_id):
         """Update detection state when a signal was seen.
         Returns True if this signal might be part of a sequence, False otherwise."""
-        if self.time_index < 8:  # should be at least 186ms
+        if self.time_index < 7:  # should be at least 163ms
             LOG.debug("Reset because signal %d too soon (%d) after last reset",
                       signal_id, self.time_index)
             self.reset()
@@ -166,11 +166,8 @@ class DetectionState(object):
                 self.last_sig_end = self.time_index
                 return True
             t_since_last = self.time_index - self.last_sig_end
-            # FIXME: still too strict: nasty busy prints can cause the pause to stretch across *9* windows!
-            # I shouldn't worry about allowing 209ms pause because two consecutive sequences will have at
-            # least 400ms in between them. I must however allow a new sequence within less than 186ms after a reset.
-            if t_since_last < 3 or t_since_last > 7:
-                # Should be between 70ms and 163ms: consider overlap due to detecting across 2
+            if t_since_last < 3 or t_since_last > 9:
+                # Should be between 70ms and 209ms: consider overlap due to detecting across 2
                 # successive windows, and allow reasonable stretch on playback of the silent
                 # part between beeps.
                 LOG.debug("Reset because signal %d too soon or late after previous signal %d (%d)",
