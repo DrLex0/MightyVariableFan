@@ -39,6 +39,7 @@ Released under Creative Commons Attribution 4.0 International license.
 
 
 import argparse
+import logging
 import os
 import sys
 from collections import deque
@@ -70,7 +71,7 @@ PWM_REQUEST_TIMEOUT = 4
 # show intensities for the signal frequencies that exceed SENSITIVITY. If you 'print' a test file
 # that plays PWM sequences, you should see responses for all the frequencies, and for every beep
 # there must be at least one response that is well above the sensitivity threshold.
-SENSITIVITY = 10
+SENSITIVITY = 10.0
 
 #### End of defaults section ####
 
@@ -114,12 +115,15 @@ LOCK_FILE = "/run/lock/beepdetect.lock"
 
 #### End of configuration section ####
 
+LOG = logging.getLogger('beepdetect')
+LOG.setLevel(logging.INFO)
+LOG_FORMAT = logging.Formatter('%(levelname)s: %(message)s')
+
 
 class DetectionState(object):
     """Manages detected sequence state."""
 
-    def __init__(self, debug=False):
-        self.debug = debug
+    def __init__(self):
         self.reset()
 
     def reset(self):
@@ -142,9 +146,8 @@ class DetectionState(object):
         """Update detection state when a signal was seen.
         Returns True if this signal might be part of a sequence, False otherwise."""
         if self.time_index < 8:  # should be at least 186ms
-            if self.debug:
-                print("Reset because signal {} too soon ({}) after last reset".format(
-                    signal_id, self.time_index))
+            LOG.debug("Reset because signal %d too soon (%d) after last reset",
+                      signal_id, self.time_index)
             self.reset()
             return False
 
@@ -156,13 +159,10 @@ class DetectionState(object):
                 # and the printer sometimes stretches beeps when really busy, therefore allow
                 # 4 windows.
                 if signal_length > 4:
-                    if self.debug:
-                        print("Reset because signal {} too long ({}x)".format(
-                            signal_id, signal_length))
+                    LOG.debug("Reset because signal %d too long (%dx)", signal_id, signal_length)
                     self.reset()
                     return False
-                if self.debug:
-                    print("Signal {} seen {}x, OK".format(signal_id, signal_length))
+                LOG.debug("Signal %d seen %dx, OK", signal_id, signal_length)
                 self.last_sig_end = self.time_index
                 return True
             t_since_last = self.time_index - self.last_sig_end
@@ -173,16 +173,12 @@ class DetectionState(object):
                 # Should be between 70ms and 163ms: consider overlap due to detecting across 2
                 # successive windows, and allow reasonable stretch on playback of the silent
                 # part between beeps.
-                if self.debug:
-                    print(
-                        "Reset because signal {} too soon or late after previous signal {} ({})".format(
-                            signal_id, self.detected[-1], t_since_last))
+                LOG.debug("Reset because signal %d too soon or late after previous signal %d (%d)",
+                          signal_id, self.detected[-1], t_since_last)
                 self.reset()
                 return False
             if len(self.detected) > SEQUENCE_LENGTH - 1:
-                if self.debug:
-                    print("Reset because of sequence with more than {} signals".format(
-                        SEQUENCE_LENGTH))
+                LOG.debug("Reset because of sequence with more than %d signals", SEQUENCE_LENGTH)
                 self.reset()
                 return False
 
@@ -205,24 +201,19 @@ class DetectionState(object):
             # It's party time!
             value = seq_to_value(self.detected)
             duty = round(float(value) * self.seq_scale_factor, 2)
-            seqstr = "".join([str(s) for s in self.detected])
-            print("DETECTION: {} PWM {}%".format(seqstr, duty))
-            if self.debug:
-                print("  sequence value: {}".format(value))
-            # If there's one thing we want to see immediately in logs, it's this.
-            sys.stdout.flush()
+            LOG.info("DETECTION: %s PWM %g%%", "".join([str(s) for s in self.detected]), duty)
+            LOG.debug("  sequence value: %d", value)
             self.reset()
             return duty
         elif len(self.detected) < SEQUENCE_LENGTH and t_since_last > 8:
-            if self.debug:
-                print("Reset because incomplete detection ({} signals)".format(
-                    len(self.detected)))
+            LOG.debug("Reset because incomplete detection (%d signals)", len(self.detected))
             self.reset()
             return False
         return None
 
 
 def open_input_stream(audio):
+    """Create an input stream on the default device chosen by PyAudio."""
     # All examples and most programs I find, set frames_per_buffer to the same size as the chunks
     # to be processed. However, I have encountered sporadic input buffer overflows when doing
     # this. It appears PyAudio has only one extra buffer to fill up while waiting for the first
@@ -241,7 +232,7 @@ def seq_to_value(sequence):
     return value
 
 def start_detecting(audio, options):
-    debug = hasattr(options, 'debug')
+    """Run the main detection loop."""
     server_ip = options.ip
     server_port = options.port
     request_timeout = options.timeout
@@ -275,21 +266,18 @@ def start_detecting(audio, options):
         try:
             req = future.result()
             if req.status_code == 200:
-                print("OK: Successfully enabled PWM server.")
+                LOG.info("OK: Successfully enabled PWM server.")
                 break
             else:
-                print("ERROR: test request to PWM server failed with status {}".format(
-                    req.status_code))
+                LOG.error("Test request to PWM server failed with status %s", req.status_code)
         except requests.ConnectionError as err:
-            print("ERROR: the PWM server may be down? {}".format(err))
+            LOG.error("The PWM server may be down? %s", err)
         attempts -= 1
-        print("Attempts left: {}".format(attempts))
+        LOG.error("Attempts left: %d", attempts)
         if attempts:
             sleep(2)
 
-    print("Beep sequence detector started.")
-    # TODO: make some basic logging handler so I don't need to call this all the time
-    sys.stdout.flush()
+    LOG.info("Beep sequence detector started.")
 
     # Also keep track of the halved signal frequencies. If there is a response at those
     # frequencies that is at least nearly as strong as the signal frequency, then the signal
@@ -300,7 +288,7 @@ def start_detecting(audio, options):
     empty_bins = zeros(2 * len(all_bins))
     last_bins = empty_bins[:]  # Ensure to copy by value, not reference
 
-    detections = DetectionState(debug)
+    detections = DetectionState()
     last_peak = None
     peak_count = 0
 
@@ -314,8 +302,7 @@ def start_detecting(audio, options):
             # stream once, because it could also be the sound device having been unplugged or
             # some other fatal error, and we don't want to hog the CPU with futile attempts to
             # recover in such cases.
-            print("ERROR while probing stream, retrying once to reopen stream: {}".format(err))
-            sys.stdout.flush()
+            LOG.error("Failed to probe stream: %s. Now retrying once to reopen stream...", err)
             in_stream = open_input_stream(audio)
             while in_stream.get_read_available() < NUM_SAMPLES:
                 sleep(0.01)
@@ -325,8 +312,7 @@ def start_detecting(audio, options):
                                     dtype=short)
         except IOError as err:
             # I could restart the stream here, but the above except catcher already does it anyway.
-            print("ERROR while reading audio data: {}".format(err))
-            sys.stdout.flush()
+            LOG.error("Could not read audio data: %s", err)
             continue
 
         # Each data point is a signed 16 bit number, so divide by 2^15 to get more reasonable FFT
@@ -345,10 +331,9 @@ def start_detecting(audio, options):
                 try:
                     req = future.result()
                     if req.status_code != 200:
-                        print("ERROR: request to PWM server failed with status {}".format(
-                            req.status_code))
+                        LOG.error("Request to PWM server failed with status %d", req.status_code)
                 except requests.ConnectionError as err:
-                    print("ERROR: could not connect to PWM server: {}".format(err))
+                    LOG.error("Could not connect to PWM server: %s", err)
 
         if DETECT_CONTINUOUS:
             # Find the peak frequency. If the same one occurs loud enough for long enough,
@@ -358,9 +343,8 @@ def start_detecting(audio, options):
                 if peak == last_peak:
                     peak_count += 1
                     if peak_count > 2:
-                        if debug:
-                            print("Reset because of continuous tone (bin {}, {}x)".format(
-                                peak, peak_count))
+                        LOG.debug("Reset because of continuous tone (bin %d, %dx)",
+                                  peak, peak_count)
                         detections.reset()
                         continue
                 else:
@@ -384,8 +368,7 @@ def start_detecting(audio, options):
             # detection to be missed. This seems lower risk than allowing any loud noise to
             # appear to be a valid signal.
             if len(signals) > 1:
-                if debug:
-                    print("Ignoring {} simultaneous signals".format(len(signals)))
+                LOG.debug("Ignoring %d simultaneous signals", len(signals))
             # Check if we have a valid sequence
             duty = detections.check_silence()
             if duty is None:  # Nothing interesting happened
@@ -400,9 +383,7 @@ def start_detecting(audio, options):
                         timeout=request_timeout))
         else:  # 1 signal
             if total_bins[len(SIG_BINS) + signals[0]] > .7 * total_bins[signals[0]]:
-                if debug:
-                    print("Reset because apparent signal {} is actually a harmonic".format(
-                        signals[0]))
+                LOG.debug("Reset because apparent signal %d is actually a harmonic", signals[0])
                 detections.reset()
                 continue
             if not detections.check_signal(signals[0]):
@@ -410,6 +391,7 @@ def start_detecting(audio, options):
 
 
 def calibration(audio, options):
+    """Run the calibration procedure."""
     sensitivity = options.sensitivity
 
     sig_bins_groups = [[x-1, x, x+1] for x in SIG_BINS]
@@ -419,13 +401,14 @@ def calibration(audio, options):
     global_sig_bins = last_sig_bins[:]
     clipped = False
 
-    print("==== Calibration mode ====")
-    print("""You should now 'print' a file that plays each of the 4 beep signals repeatedly
-    an equal number of times. Make sure the printer does not play any other sounds.
-  Press CTRL-C when done.
-  """)
-    print("Intensities for the {} signal frequencies if any exceeds {}:".format(
-        len(SIG_BINS), sensitivity))
+    LOG.info("==== Calibration mode ====")
+    LOG.info("""You should now 'print' a file that plays each of the 4 beep signals
+    repeatedly an equal number of times. Make sure the printer does not play
+    any other sounds.
+    Press CTRL-C when done.
+""")
+    LOG.info("Intensities for the %s signal frequencies if any exceeds %g:",
+             len(SIG_BINS), sensitivity)
 
     in_stream = open_input_stream(audio)
     chunks_recorded = 0
@@ -440,15 +423,15 @@ def calibration(audio, options):
                                         dtype=short)
                 chunks_recorded += 1
             except IOError as err:
-                print("ERROR while reading audio data: {}".format(err))
+                LOG.error("Could not read audio data: %s", err)
                 continue
 
             amax, amin = max(audio_data), min(audio_data)
             if amin == -32768 or amax == 32767:
                 clipped = True
-                print("WARNING: clipping detected")
+                LOG.warning("Clipping detected")
             elif amin == 0 and amax == 0:
-                print("WARNING: perfect silence detected, this is highly unlikely")
+                LOG.warning("Perfect silence detected, this is highly unlikely")
 
             intensity = abs(fft(audio_data / 32768.0)[:NUM_SAMPLES // 2])
             current_sig_bins = [intensity[sig_bins_ext[i]] for i in sig_bin_indices]
@@ -461,53 +444,54 @@ def calibration(audio, options):
                 global_sig_bins = list(map(add, global_sig_bins, current_sig_bins))
                 out = ["{:.3f}".format(total_sig_bins[i])
                        for i in sig_bin_indices if (i + 2) % 3 == 0]
-                print("  ".join(out))
+                LOG.info("  ".join(out))
     except KeyboardInterrupt:
         elapsed_time = time() - start_time
-        print("\nExiting calibration mode and generating statistics...")
+        LOG.info("-----")
+        LOG.info("Exiting calibration mode and generating statistics...")
 
-    print("{} chunks in {} seconds = {:.3f}/s".format(
-        chunks_recorded,
-        elapsed_time,
-        chunks_recorded/elapsed_time))
-    print("  If this is significantly lower than {:.3f}, you're in trouble.\n".format(
-        float(SAMPLING_RATE)/NUM_SAMPLES))
+    LOG.info("%d chunks in %d seconds = %.3f/s",
+             chunks_recorded,
+             elapsed_time,
+             chunks_recorded/elapsed_time)
+    LOG.info("  If this is significantly lower than %.3f, you're in trouble.",
+             float(SAMPLING_RATE)/NUM_SAMPLES)
 
     if clipped:
-        print("Warning: too loud signal has been detected. If only valid beep sequences were \
+        LOG.warning("Too loud signal has been detected. If only valid beep sequences were \
   played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other \
-  sounds than the PWM sequences.)\n")
+  sounds than the PWM sequences.)")
 
     bins_vs_intensities = {
         global_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices if global_sig_bins[i] > 0
     }
     sorted_bins = [value for _, value in sorted(iter(bins_vs_intensities.items()), reverse=True)]
-    print(
+    LOG.info(
         "Bins, including neighboring ones, sorted by average response intensity from high to low:")
-    print(" > ".join(map(str, sorted_bins)))
+    LOG.info(" > ".join(map(str, sorted_bins)))
     for group in sig_bins_groups:
         try:
             pivot = sorted_bins.index(group[1])
         except ValueError:
-            print("Bin {} had no signals".format(group[1]))
+            LOG.warning("Bin %d had no signals", group[1])
             continue
         better = None
         for i in [0, 2]:
             if sorted_bins.index(group[i]) < pivot:
                 better = group[i]
         if better:
-            print("Bin {} appears to be better than bin {}".format(better, group[1]))
+            LOG.info("Bin %d appears to be better than bin %d", better, group[1])
         else:
-            print("Bin {} looks good".format(group[1]))
+            LOG.info("Bin %d looks good", group[1])
 
 
 def clean_exit():
-    print("Exiting...")
+    LOG.info("Exiting...")
     if os.path.isfile(LOCK_FILE):
         os.unlink(LOCK_FILE)
 
 def terminated(num, _):
-    print("Caught signal {}".format(num))
+    LOG.warning("Caught signal %d", num)
     sys.exit(0)  # This will trigger clean_exit through atexit.
 
 def create_lock_file():
@@ -515,17 +499,17 @@ def create_lock_file():
         # Prevent two instances from trying to run at the same time, also useful to allow
         # pwm_server.py to show a warning if this daemon is not active.
         if os.path.isfile(LOCK_FILE):
-            print(
-                "ERROR: another instance is already running, or has exited without cleaning up its lock file at {}".format(
-                    LOCK_FILE),
-                file=sys.stderr)
+            LOG.fatal(
+                "Another instance is already running, or has exited without cleaning up its lock file at %s",
+                LOCK_FILE)
             sys.exit(1)
         with open(LOCK_FILE, "w") as file_handle:
             file_handle.write(str(os.getpid()))
     else:
         # Do not make this a fatal error to facilitate testing on other platforms.
-        print("Not creating a lockfile at {} because the directory is not writable or does not exist.".format(
-            LOCK_FILE))
+        LOG.warning(
+            "Not creating a lockfile at %s because the directory is not writable or does not exist.",
+            LOCK_FILE)
     import atexit
     import signal
     atexit.register(clean_exit)
@@ -556,6 +540,20 @@ if __name__ == '__main__':
                         default=SENSITIVITY)
 
     args = parser.parse_args()
+
+    # Send info and debug messages to stdout, warning and above to stderr.
+    handler_info = logging.StreamHandler(sys.stdout)
+    if hasattr(args, 'debug'):
+        handler_info.setLevel(logging.DEBUG)
+        LOG.setLevel(logging.DEBUG)
+    handler_info.addFilter(lambda record: record.levelno <= logging.INFO)
+    handler_warn = logging.StreamHandler()
+    handler_warn.setLevel(logging.WARNING)
+    handler_info.setFormatter(LOG_FORMAT)
+    handler_warn.setFormatter(LOG_FORMAT)
+    LOG.addHandler(handler_info)
+    LOG.addHandler(handler_warn)
+    LOG.debug("Debug output enabled")
 
     create_lock_file()
     audio = pyaudio.PyAudio()
