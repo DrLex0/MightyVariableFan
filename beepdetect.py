@@ -36,6 +36,8 @@ Released under Creative Commons Attribution 4.0 International license.
 #   within one sequence were stretched, it should still be deemed OK. To compensate for the extra
 #   sloppiness, there should be a more strict test on silence between the beeps. Maybe the
 #   continuous tone check should be enabled after all.
+# TODO: calibration mode should check whether all the expected sequences could be detected (don't
+#   need the same detection algorithm, can use something more crude).
 
 
 import argparse
@@ -67,11 +69,11 @@ PWM_REQUEST_TIMEOUT = 4
 # Sensitivity threshold for detecting signals. This is tricky! Too low threshold will lead to
 # false detections, down to the point where even a slight echo of a real signal can cause
 # problems. Obviously, too high threshold will lead to missed detections.
-# To help determining a good threshold, run this script in calibration mode (-c option). It will
-# show intensities for the signal frequencies that exceed SENSITIVITY. If you 'print' a test file
-# that plays PWM sequences, you should see responses for all the frequencies, and for every beep
-# there must be at least one response that is well above the sensitivity threshold.
-SENSITIVITY = 10.0
+# Normally, the default should be fine if you configured the sound card as described in the README
+# file. If you do want to verify it, run this script in calibration mode (-c option) and 'print'
+# the BeepCalibration file. Exit the script (ctrl-C) when the LCD panel tells you to. Amidst the
+# console output will be a suggested threshold value.
+SENSITIVITY = 20.0
 
 #### End of defaults section ####
 
@@ -91,6 +93,12 @@ NUM_SAMPLES = 1024
 #   i*SAMPLING_RATE/NUM_SAMPLES.
 SIG_BINS = [139, 151, 161, 172]
 
+# Scale factors for each bin, applied before thresholding on sensitivity. These may vary between
+# microphones and buzzers. When running the calibration procedure exactly as prescribed, you will
+# automatically get suggested values to enter here. The scales are not used during calibration,
+# which is why the calibration procedure should be run at a lower sensitivity setting.
+SIG_SCALES = [1.0, 1.8, 2.9, 3.6]
+
 # Indices of the bins that may contain frequencies produced by the buzzer. Anything outside this
 # will be ignored. (Only used if DETECT_CONTINUOUS is enabled)
 TONE_BIN_LOWER = 3
@@ -108,6 +116,11 @@ DETECT_CONTINUOUS = False
 # The number of beeps in a sequence. You probably shouldn't change this unless you plan to use
 # this detector for other things.
 SEQUENCE_LENGTH = 3
+
+# When a signal appears to be detected, the intensity of half the signal frequency is also checked
+# and if it is at least the signal intensity times this factor, the signal is considered a
+# harmonic and rejected.
+HARMONIC_FACTOR = 1.3
 
 # Path to a file that signals whether an instance of this script is active. The location must be
 # writable. The PID of the running instance will be written to the file.
@@ -355,7 +368,7 @@ def start_detecting(audio, options):
         # windows, to get a more consistent intensity value even when beep spans two windows.
         current_bins = [intensity[all_bins[i]] for i in all_bin_indices]
         total_bins = list(map(add, last_bins, current_bins))
-        signals = [i for i in sig_bin_indices if total_bins[i] > sensitivity]
+        signals = [i for i in sig_bin_indices if total_bins[i] * SIG_SCALES[i] > sensitivity]
         last_bins = current_bins[:]
 
         if len(signals) != 1:  # either 'silence' or multiple signals
@@ -379,8 +392,10 @@ def start_detecting(audio, options):
                             server_ip, server_port, duty),
                         timeout=request_timeout))
         else:  # 1 signal
-            if total_bins[len(SIG_BINS) + signals[0]] > .7 * total_bins[signals[0]]:
-                LOG.debug("Reset because apparent signal %d is actually a harmonic", signals[0])
+            harmonic_ratio = total_bins[len(SIG_BINS) + signals[0]] / total_bins[signals[0]]
+            if harmonic_ratio > HARMONIC_FACTOR:
+                LOG.debug("Reset because apparent signal %d is actually a harmonic (%.1f)",
+                          signals[0], harmonic_ratio)
                 detections.reset()
                 continue
             if not detections.check_signal(signals[0]):
@@ -395,7 +410,9 @@ def calibration(audio, options):
     sig_bins_ext = [sig_bin for group in sig_bins_groups for sig_bin in group]  # flatten it
     sig_bin_indices = list(range(0, len(sig_bins_ext)))
     last_sig_bins = zeros(len(sig_bins_ext))
-    global_sig_bins = last_sig_bins[:]
+    sum_sig_bins = last_sig_bins[:]
+    count_sig_bins = [0] * len(sig_bins_ext)
+    global_divider = 0
     clipped = False
 
     LOG.info("==== Calibration mode ====")
@@ -404,6 +421,10 @@ def calibration(audio, options):
     any other sounds.
     Press CTRL-C when done.
 """)
+    # Because the calibration procedure doesn't use SIG_SCALES, reduce the normal sensitivity
+    # value to ensure we catch all signals.
+    LOG.info("Using 1/4th of the normal sensitivity value %g.", sensitivity)
+    sensitivity /= 4.0
     LOG.info("Intensities for the %s signal frequencies if any exceeds %g:",
              len(SIG_BINS), sensitivity)
 
@@ -438,7 +459,10 @@ def calibration(audio, options):
             if signals:
                 # Only add to the statistics if there is any 'detected' signal, to avoid
                 # accumulating noise
-                global_sig_bins = list(map(add, global_sig_bins, current_sig_bins))
+                for i in signals:
+                    sum_sig_bins[i] += total_sig_bins[i]
+                    count_sig_bins[i] += 1
+                global_divider += 1
                 out = ["{:.3f}".format(total_sig_bins[i])
                        for i in sig_bin_indices if (i + 2) % 3 == 0]
                 LOG.info("  ".join(out))
@@ -459,9 +483,28 @@ def calibration(audio, options):
   played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other \
   sounds than the PWM sequences.)")
 
-    bins_vs_intensities = {
-        global_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices if global_sig_bins[i] > 0
-    }
+    avg_bin_intensities = [sum_sig_bins[i] / max(count_sig_bins[i], 1)
+                           for i in range(1, len(sum_sig_bins), 3)]
+    LOG.info("Average intensities for the signal bins when above the threshold:")
+    LOG.info(", ".join(["{:.3f}".format(i) for i in avg_bin_intensities]))
+    LOG.info("-> after applying current SIG_SCALES:")
+    LOG.info(", ".join(["{:.3f}".format(i * j)
+                        for i, j in zip(avg_bin_intensities, SIG_SCALES)]))
+    max_avg_intensity = max(avg_bin_intensities)
+    try:
+        avg_bin_intensities.index(0.0)
+        LOG.warning("Not all bins had detections, can suggest neither SIG_SCALES nor threshold!")
+    except ValueError:
+        # This is not the exception, it's the rule! I guess this is Pythonic...
+        suggest_scales = [max_avg_intensity / i for i in avg_bin_intensities]
+        LOG.info("-> suggested values for SIG_SCALES:")
+        LOG.info(", ".join(["{:.1f}".format(i) for i in suggest_scales]))
+        normalized_intensities = [i * j for i, j in zip(avg_bin_intensities, suggest_scales)]
+        suggest_sensitivity = min(normalized_intensities) / 3
+        LOG.info("-> suggested sensitivity: %.1f", suggest_sensitivity)
+
+    LOG.info("-----")
+    bins_vs_intensities = {sum_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices}
     sorted_bins = [value for _, value in sorted(iter(bins_vs_intensities.items()), reverse=True)]
     LOG.info(
         "Bins, including neighboring ones, sorted by average response intensity from high to low:")
@@ -474,8 +517,11 @@ def calibration(audio, options):
             continue
         better = None
         for i in [0, 2]:
-            if sorted_bins.index(group[i]) < pivot:
-                better = group[i]
+            try:
+                if sorted_bins.index(group[i]) < pivot:
+                    better = group[i]
+            except ValueError:
+                pass
         if better:
             LOG.info("Bin %d appears to be better than bin %d", better, group[1])
         else:
@@ -483,15 +529,20 @@ def calibration(audio, options):
 
 
 def clean_exit():
+    """To be invoked when the program is about to stop."""
     LOG.info("Exiting...")
     if os.path.isfile(LOCK_FILE):
         os.unlink(LOCK_FILE)
 
 def terminated(num, _):
+    """SIGTERM signal handler."""
     LOG.warning("Caught signal %d", num)
     sys.exit(0)  # This will trigger clean_exit through atexit.
 
 def create_lock_file():
+    """If the expected lock file path exists, try to create a lock file and exit if there is
+    one already; if the path is not writable, don't bother trying to create the lock file,
+    just print a warning and continue."""
     if os.access(os.path.dirname(LOCK_FILE), os.W_OK):
         # Prevent two instances from trying to run at the same time, also useful to allow
         # pwm_server.py to show a warning if this daemon is not active.

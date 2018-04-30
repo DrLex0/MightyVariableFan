@@ -144,7 +144,7 @@ M300 S0 P100
 M300 S7407 P20
 M300 S0 P200; end sequence
 
-M71; Make sure to stop   beepdetect.py now.  Then press OK to end
+M71; Make sure to stop   beepdetect now when there is no more    clipping. [Press OK]
 ; See comment at start
 M70 P2; Making some noise...
 
