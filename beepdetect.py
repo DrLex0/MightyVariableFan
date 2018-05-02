@@ -222,15 +222,33 @@ class DetectionState(object):
         return None
 
 
-def open_input_stream(audio):
-    """Create an input stream on the default device chosen by PyAudio."""
+def list_devices():
+    """Outputs a list of all devices PyAudio can find that have an available input channel."""
+    audio = pyaudio.PyAudio()
+    info = audio.get_host_api_info_by_index(0)
+    numdevices = info.get('deviceCount')
+    LOG.info("Total number of devices: %d", numdevices)
+    LOG.info("Available devices with inputs:")
+    count = 0
+    for i in range(0, numdevices):
+        if audio.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels') > 0:
+            count += 1
+            LOG.info("  Input Device id %d: %s",
+                     i, audio.get_device_info_by_host_api_device_index(0, i).get('name'))
+    if not count:
+        LOG.warning("None found. Check whether your sound card is plugged in " +
+                    "and not in use by another program.")
+
+def open_input_stream(audio, options):
+    """Create a PyAudio input stream on the device specified by options.device."""
     # All examples and most programs I find, set frames_per_buffer to the same size as the chunks
     # to be processed. However, I have encountered sporadic input buffer overflows when doing
     # this. It appears PyAudio has only one extra buffer to fill up while waiting for the first
     # one to be emptied, and sometimes this gives just too little time to do our work in between
     # two reads. So to get a larger margin, I simply request a buffer twice as big as my chunk
     # size, which seems to work fine.
-    return audio.open(format=pyaudio.paInt16,
+    device = options.device if hasattr(options, 'device') else None
+    return audio.open(input_device_index=device, format=pyaudio.paInt16,
                       channels=1, rate=SAMPLING_RATE, input=True,
                       frames_per_buffer=2 * NUM_SAMPLES)
 
@@ -241,7 +259,7 @@ def seq_to_value(sequence):
         value += 4 ** i * sequence[-(i+1)]
     return value
 
-def start_detecting(audio, options):
+def start_detecting(options):
     """Run the main detection loop."""
     server_ip = options.ip
     server_port = options.port
@@ -264,7 +282,8 @@ def start_detecting(audio, options):
 
     # This will probably barf many errors, you could clean up your asound.conf to get rid of
     # some of them, but they are harmless anyway.
-    in_stream = open_input_stream(audio)
+    audio = pyaudio.PyAudio()
+    in_stream = open_input_stream(audio, options)
 
     # Perform a first request to the PWM server. This has three functions:
     # 1, warn early if the server isn't running;
@@ -313,7 +332,7 @@ def start_detecting(audio, options):
             # some other fatal error, and we don't want to hog the CPU with futile attempts to
             # recover in such cases.
             LOG.error("Failed to probe stream: %s. Now retrying once to reopen stream...", err)
-            in_stream = open_input_stream(audio)
+            in_stream = open_input_stream(audio, options)
             while in_stream.get_read_available() < NUM_SAMPLES:
                 sleep(0.01)
 
@@ -402,7 +421,7 @@ def start_detecting(audio, options):
                 last_bins = empty_bins[:]
 
 
-def calibration(audio, options):
+def calibration(options):
     """Run the calibration procedure."""
     sensitivity = options.sensitivity
 
@@ -428,7 +447,8 @@ def calibration(audio, options):
     LOG.info("Intensities for the %s signal frequencies if any exceeds %g:",
              len(SIG_BINS), sensitivity)
 
-    in_stream = open_input_stream(audio)
+    audio = pyaudio.PyAudio()
+    in_stream = open_input_stream(audio, options)
     chunks_recorded = 0
     start_time = time()
 
@@ -586,6 +606,10 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
                         help='Sensitivity threshold for detecting signals',
                         default=SENSITIVITY)
+    parser.add_argument('-D', '--device', type=int,
+                        help='Use this device ID instead of the default input device')
+    parser.add_argument('-L', '--list_devices', action='store_true',
+                        help='List available devices with inputs')
 
     args = parser.parse_args()
 
@@ -603,9 +627,12 @@ if __name__ == '__main__':
     LOG.addHandler(handler_warn)
     LOG.debug("Debug output enabled")
 
+    if hasattr(args, 'list_devices'):
+        list_devices()
+        sys.exit(0)
+
     create_lock_file()
-    audio = pyaudio.PyAudio()
     if hasattr(args, 'calibrate'):
-        calibration(audio, args)
+        calibration(args)
     else:
-        start_detecting(audio, args)
+        start_detecting(args)
