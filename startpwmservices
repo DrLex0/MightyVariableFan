@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Enter the ID of the 'micsnoop' device, as can be found in the output of `beepdetect.py -L`:
+AUDIO_DEVICE=4
+
 SERVER_LOG=/var/log/pwm_server.log
 DETECT_LOG=/var/log/beepdetect.log
 
@@ -10,5 +13,4 @@ DETECT_LOG=/var/log/beepdetect.log
 [ -f "$DETECT_LOG" ] && mv -f "$DETECT_LOG" /tmp/old_beepdetect.log
 
 su pi -c 'nohup /usr/local/bin/pwm_server.py' 2>&1 > $SERVER_LOG &
-nohup nice -n -15 /usr/local/bin/beepdetect.py 2>&1 > $DETECT_LOG &
-
+nohup nice -n -15 /usr/local/bin/beepdetect.py -D "$AUDIO_DEVICE" 2>&1 > $DETECT_LOG &

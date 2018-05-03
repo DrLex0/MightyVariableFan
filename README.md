@@ -67,7 +67,7 @@ You need:
 * A small **5V power supply** for your Pi. Ideally, it should be small enough to fit inside your printer. I used a simple off-the shelf supply ([this one](https://www.conrad.be/p/raspberry-pi-netvoeding-sp-5c-zwart-raspberry-pi-3-b-1462834) to be exact) that I could tuck under a bundle of wires inside the printer. I connected it to the mains contacts of the printer's PSU, so the Pi is toggled together with the rest of the printer. If you have a choice between multiple supplies that fit, pick the one with the most flexible cable and the most compact microUSB plug. This is where you'll have to be a bit creative with parts you can find in local stores. You could take apart a USB power supply to more easily connect it to the mains, or you could plug the supply into half an extension cord, like I did. Whatever you do, do not create dubious and dangerous constructions that expose mains voltage.
 * A **USB sound card.** It will be much easier if it is as small as possible. I recommend to buy one of those extremely cheap ‘3D sound’ sticks with a yellow and green 3.5mm jack. These are rather crappy, but very compact, well supported in Linux, and for the purpose of this application they are good enough. The plastic case of these cards is unnecessarily large; to make it much easier to fit inside your printer, you can print [this custom case](https://www.thingiverse.com/thing:2822474) if it fits your model of sound card (if not, modifying the model should be easy).
 * A tiny **microphone** that can be mounted very close (within 10 mm) to the buzzer. I recommend to build your own microphone with a standard electret capsule (9.7mm diameter), a bit of shielded cable, and a 3.5mm plug. This can be mounted perfectly onto the buzzer with a [3D printed part](https://www.thingiverse.com/thing:2852499).
-* A **24V MOSFET** break-out board. There is a very common one for the IRF520, which is very easy to mount inside the printer with yet another [printed part](https://www.thingiverse.com/thing:2852499). (Given the low gate voltage provided by the Pi, this MOSFET should not be used to switch high currents. For switching the cooling fan it is perfectly adequate however.)
+* A **24V MOSFET** break-out board. There is a very common one for the IRF520, which is very easy to mount inside the printer with yet another [printed part](https://www.thingiverse.com/thing:2852499).
 * A **cable** to connect the GPIO pins on the Pi to the MOSFET. It is best to solder your own, using low-profile or angled plugs, because space may be tight depending on where you will mount the Pi.
 
 
@@ -95,11 +95,17 @@ sudo mv * /usr/local/bin/
 ```
 You also need to copy the *pwm_server* directory (with the CSS file inside it) into `/home/pi/`.
 
+Next, copy the *asound.conf* file to `/etc/asound.conf`. If you are using a different sound card, you may need to edit the ‘pcm’ value, but it should work as-is if you build the system as described here.
+
+Now run: `beepdetect.py -L`<br>
+This will output a list of devices. Verify that the device called `micsnoop` has ID 4. If not, edit */usr/local/bin/startpwmservices* and set the value of `AUDIO_DEVICE` to the correct ID.
+
 Finally, add the following line before the “`exit 0`” line in `/etc/rc.local`. You need root permissions for this, for instance use: `sudo nano /etc/rc.local` or: `sudo vim.tiny /etc/rc.local` depending on your preferred editor.
 ```
 /usr/local/bin/startpwmservices
 ```
-Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, change the hostname, … You should also disable everything you don't need, for instance you should most likely disable the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
+
+Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, hostname, … You should also disable everything you don't need, for instance you should most likely disable the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
 If you are really adamant on getting the best possible performance, you could install a real-time kernel. However, this seems overkill from my experiences so far.<br>
 How to do those things, is outside the scope of this guide. There is plenty of community support available for the Raspberry Pi!
 
@@ -132,9 +138,9 @@ Next, power up the Pi. After a few seconds, you should see the LED on the IRF520
 Next, log into the Pi through SSH and run:
 ```
 sudo stoppwmservices
-arecord -V mono -D hw:1,0 -f S16_LE -r 44100 test.wav
+arecord -V mono -D micsnoop -f S16_LE -r 44100 test.wav
 ```
-Say something into the microphone and stop the arecord process with ctrl-C. If you then copy the resulting test.wav file to your computer and play it, you should hear what you have recorded. If not, check the connections and alsamixer settings for the USB sound card (see the ‘calibrating’ section). If the recording has an awful lot of very low-frequency noise, then the cable going to the microphone is poorly shielded and picking up WiFi interference. (You might get away with this, but it is better to get a better cable.)
+Say something into the microphone and stop the arecord process with ctrl-C. If you then copy the resulting test.wav file to your computer and play it, you should hear what you have recorded. If not, check the connections and alsamixer settings for the USB sound card (see the ‘calibrating’ section). Also verify that the `hw:1,0` ALSA device is actually the microphone, if not then update the ‘pcm’ value in `/etc/asound.conf`. If the recording is OK but has an awful lot of very low-frequency noise, then the cable going to the microphone is poorly shielded and picking up WiFi interference. You might get away with this, but it is better to get a proper shielded cable.
 
 
 ### Step 5: mount and connect the parts
@@ -188,8 +194,6 @@ You need *Python 3.5* or newer on the machine where you'll be running the postpr
 * `LEAD_TIME` is the number of seconds by which beep sequences should be moved forward in time. A sequence takes about 0.7 seconds to be played and detected, and the time needed to spin up the fan must also be considered, hence a value around 1 second should be reasonable. In my case 1.3 seconds seems optimal. Mind that this is done on a best-effort basis. The time will not always be exact because granularity depends on duration of print moves. If the last move before an original M106 command takes more than twice `LEAD_TIME`, the script will not be able to anticipate the beep sequence. The script can split up long moves to obtain a good lead time, this is the `--allow_split` option which is off by default. It is possible that enabling this option can cause visible artefacts, so there is a bit of a trade-off between cooling performance and surface quality.
 * `FEED_FACTOR` and `FEED_LIMIT_Z` are values specific to the FlashForge Creator Pro and it is unlikely you need to change them, only do so if you know what you are doing.
 
-**Important:** the script in its current state is not yet aware of dual extrusion. It will especially not work with my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html).
-
 Once the script has been configured, you can either manually run it on every G-code file you want to print (run with `-h` for more information), or you can somehow automate it inside your workflow. In case you use Slic3r with [my (DrLex) configuration](https://www.thingiverse.com/thing:2367215), an updated version of the `make_fcp_x3g` script will be released shortly to have it invoke the PWM post-processing script as well.
 
 **Note:** even though you should reconfigure your slicer to output RepRap-flavor G-code, the GPX program to convert G-code into X3G must still be configured to output code for the FlashForge Creator Pro (`-m fcp` option)!
@@ -203,7 +207,18 @@ In the Tools folder, there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that pl
 Last but not least, if you previously neglected fan speed values in your slicer profiles (as you should have), now is the time to go through them again and try to enter sensible values. Optimal values will differ between each filament, and also depend on what kind of extruder, nozzle, and cooling duct you are using. Be prepared to experiment and tweak! Also be prepared to be amazed at how much of a quality improvement proper cooling can provide.
 
 
+## Technical details
+
+Look in the source code comments for most of the particularities of how the system works.
+
+The reason why we're recording from an ALSA *dsnoop* slave device, is that this avoids the issue of clock skew between the sound card and the host. When recording directly from the raw device, eventually enough drift between the clocks will build up such that a buffer overflow (if the sound card runs faster) or underrun (slower) occurs. This will lead respectively to either omission of a chunk of data, or repeating the same chunk twice. Both are obviously bad for a detection system which relies on short beep sounds. The dsnoop device does continuous resampling instead of abrupt corrections. The resampling quality is probably far from audiophile-level, but the FFT couldn't care less as long as there is a continuous flow of samples without gaps or repetitions.
+
+The IRF520 MOSFET is theoretically capable of drawing up to 9 A of current. However, with the low gate voltage provided by the Pi, the maximum current will be much lower. For switching the cooling fan it is perfectly adequate, but keep this in mind should you would want to switch heavier loads.
+
+
 ## Current Issues
+
+**Important:** the script in its current state is not yet aware of dual extrusion. It will especially not work with my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html).
 
 Recent versions of Sailfish (the firmware used on the FFCP) always play a tune whenever all heaters have reached their target temperature. This was not the case in older versions like the one that originally came with my printer. So far I have merely found this annoying, but now it becomes a *hazard* because if this tune is played exactly at the moment a sequence is being played, the latter will be interrupted and the fan will not change speed. There is unfortunately no way to disable this tune without recompiling Sailfish. I have created a [pull request](https://github.com/jetty840/Sailfish-MightyBoardFirmware/pull/201) to make this tune a toggle-able feature in a future release, and I will release a build with this feature shortly. If you never change the bed or extruder temperatures during a print, and your extruder PID controllers are well-tuned, then you won't need this build and the standard firmware from FlashForge will do fine.
 

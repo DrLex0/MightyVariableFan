@@ -245,12 +245,13 @@ def open_input_stream(audio, options):
     # to be processed. However, I have encountered sporadic input buffer overflows when doing
     # this. It appears PyAudio has only one extra buffer to fill up while waiting for the first
     # one to be emptied, and sometimes this gives just too little time to do our work in between
-    # two reads. So to get a larger margin, I simply request a buffer twice as big as my chunk
-    # size, which seems to work fine.
+    # two reads. So to get a larger margin, I simply request a buffer that is a multiple of my
+    # chunk size, which seems to work fine.
+    # Note: the buffer of the audio input device (see asound.conf) must be at least as large.
     device = options.device if hasattr(options, 'device') else None
     return audio.open(input_device_index=device, format=pyaudio.paInt16,
                       channels=1, rate=SAMPLING_RATE, input=True,
-                      frames_per_buffer=2 * NUM_SAMPLES)
+                      frames_per_buffer=4 * NUM_SAMPLES)
 
 def seq_to_value(sequence):
     """Converts a sequence of base 4 numbers to an integer."""
@@ -283,7 +284,6 @@ def start_detecting(options):
     # This will probably barf many errors, you could clean up your asound.conf to get rid of
     # some of them, but they are harmless anyway.
     audio = pyaudio.PyAudio()
-    in_stream = open_input_stream(audio, options)
 
     # Perform a first request to the PWM server. This has three functions:
     # 1, warn early if the server isn't running;
@@ -320,12 +320,14 @@ def start_detecting(options):
     detections = DetectionState()
     last_peak = None
     peak_count = 0
+    in_stream = open_input_stream(audio, options)
 
     while True:
         try:
-            # Wait until we have enough samples to work with
+            # Wait until we have enough samples to work with. Sleep at most 1/4 of the duration
+            # of one audio chunk, otherwise input overflow risk increases.
             while in_stream.get_read_available() < NUM_SAMPLES:
-                sleep(0.01)
+                sleep(0.005)
         except IOError as err:
             # Most likely an overflow despite my attempts to avoid them. Only try to reopen the
             # stream once, because it could also be the sound device having been unplugged or
@@ -334,7 +336,7 @@ def start_detecting(options):
             LOG.error("Failed to probe stream: %s. Now retrying once to reopen stream...", err)
             in_stream = open_input_stream(audio, options)
             while in_stream.get_read_available() < NUM_SAMPLES:
-                sleep(0.01)
+                sleep(0.005)
 
         try:
             audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
@@ -455,7 +457,7 @@ def calibration(options):
     try:
         while True:
             while in_stream.get_read_available() < NUM_SAMPLES:
-                sleep(0.01)
+                sleep(0.005)
             try:
                 audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
                                         dtype=short)
