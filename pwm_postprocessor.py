@@ -650,16 +650,21 @@ def ramp_up_scale(layer_z, config):
     return min(1.0, layer_z * (1.0 - config.scale0) / config.zmax + config.scale0)
 
 
+# SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
 parser = argparse.ArgumentParser(
     description='Post-processing script to convert M106 fan speed commands into beep sequences \
 that can be detected by beepdetect.py, to obtain variable fan speed on 3D printers that \
 lack a PWM fan output.',
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     argument_default=argparse.SUPPRESS)
-# SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
-parser.add_argument('in_file', type=argparse.FileType('r'),
+
+# We only care about what is in the G-code, any character encoding problems in comment lines
+# will be mangled without warning.
+parser.add_argument('in_file',
+                    type=argparse.FileType('r', encoding='utf-8', errors='replace'),
                     help='file to process')
-parser.add_argument('-o', '--out_file', type=argparse.FileType('w'),
+parser.add_argument('-o', '--out_file',
+                    type=argparse.FileType('w', encoding='utf-8'),
                     help='optional file to write to (default is to print to standard output)')
 parser.add_argument('-a', '--allow_split', action='store_true',
                     help=('Allow splitting long moves to maintain correct lead time. ' +
