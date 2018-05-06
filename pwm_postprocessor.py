@@ -29,7 +29,7 @@ from collections import deque
 
 # Z coordinate (mm) below which fan speeds will be linearly scaled with increasing Z.
 # The correct value for this depends heavily on the design of your fan duct and extruder assembly.
-RAMP_UP_ZMAX = 5.0
+RAMP_UP_ZMAX = 4.0
 
 # The scale factor at Z=0. In other words, the linear scaling curve is a line between the points
 # (0.0, RAMP_UP_SCALE0) and (RAMP_UP_ZMAX, 1.0) on a (Z, scale) graph.
