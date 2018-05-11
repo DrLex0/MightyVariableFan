@@ -40,7 +40,7 @@ RAMP_UP_SCALE0 = 0.05
 # granularity depends on duration of print moves, moreover this script does not consider
 # acceleration when estimating the duration of moves. Acceleration will make actual time slightly
 # longer than what you configure here.
-LEAD_TIME = 1.3
+LEAD_TIME = 1.2
 
 # Multiplier between speed in mm/s and feedrate numbers for your printer. For the FFCP this should
 # be 60, and be the same for both X, Y, Z, and even E.
