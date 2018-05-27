@@ -5,8 +5,11 @@
 ; must enable the -a option to allow splitting up long moves, even if you don't plan to use this
 ; option for real prints. The best way to verify whether your lead time is OK, is to feel at the
 ; exhaust of your fan duct whether air flows at the moment the short segment at the front is
-; being 'printed'. The test will make three loops, with an increasingly short segment each time.
-; The pre-made X3G file was generated with the default lead time of 1.3 seconds.
+; being 'printed'. The test will make three loops with an increasingly short segment each time.
+;
+; The pre-made X3G file was generated with the default lead time of 1.2 seconds as follows:
+; # pwm_postprocessor.py -ao /tmp/FanLeadTimeTest-proc.gcode FanLeadTimeTest.gcode
+; # gpx -m fcp /tmp/FanLeadTimeTest-proc.gcode FanLeadTimeTest.x3g
 
 M107
 
