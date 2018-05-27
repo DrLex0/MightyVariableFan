@@ -63,53 +63,36 @@ If you're not afraid of soldering on your printer's main board, you can omit the
 ### Step 1: gather the required hardware
 
 You need:
-* A **Raspberry Pi** that has sufficient oomph to run the beep detector, and also WiFi (not strictly essential, but recommended). I am not sure whether a Pi 2 suffices, but a 3B certainly does. These things are cheap anyway so if you already have an old Pi inside your printer, this might be a good time to upgrade it. There is a pretty good place to mount the Pi in the underside of the printer by using [3D printed brackets](https://www.thingiverse.com/thing:2852432) that can be glued in place.
+* A **Raspberry Pi** that has sufficient oomph to run the beep detector, and also WiFi (not strictly essential, but recommended). I am not sure whether a Pi 2 suffices, but a 3B certainly does. These things are cheap anyway so if you already have an old Pi inside your printer, this might be a good time to upgrade it. You don't need a huge microSD card, 16GB is sufficient.
 * A small **5V power supply** for your Pi. Ideally, it should be small enough to fit inside your printer. I used a simple off-the shelf supply ([this one](https://www.conrad.be/p/raspberry-pi-netvoeding-sp-5c-zwart-raspberry-pi-3-b-1462834) to be exact) that I could tuck under a bundle of wires inside the printer. I connected it to the mains contacts of the printer's PSU, so the Pi is toggled together with the rest of the printer. If you have a choice between multiple supplies that fit, pick the one with the most flexible cable and the most compact microUSB plug. This is where you'll have to be a bit creative with parts you can find in local stores. You could take apart a USB power supply to more easily connect it to the mains, or you could plug the supply into half an extension cord like I did. Whatever you do, do not create dubious and dangerous constructions that expose mains voltage.
 * A **USB sound card.** It will be much easier if it is as small as possible. I recommend to buy one of those extremely cheap ‘3D sound’ sticks with yellow and green 3.5mm jack. These are rather crappy but very compact, well supported in Linux, and for the purpose of this application they are good enough. The plastic case of these cards is unnecessarily large; to make it much easier to fit inside your printer you can print [this custom case](https://www.thingiverse.com/thing:2822474) if it fits your model of sound card (if not, modifying the model should be easy).
 * A tiny **microphone** that can be mounted very close (within 10 mm) to the buzzer. I recommend to build your own microphone with a standard electret capsule (9.7mm diameter), a bit of shielded cable, and a 3.5mm plug. This can be mounted perfectly onto the buzzer with a [3D printed part](https://www.thingiverse.com/thing:2852499).
 * A **24V MOSFET** break-out board. There is a very common one for the IRF520, which is very easy to mount inside the printer with yet another [printed part](https://www.thingiverse.com/thing:2852499).
-* A **cable** to connect the GPIO pins on the Pi to the MOSFET. It is best to solder your own using low-profile or angled plugs, because space may be tight depending on where you will mount the Pi.
+* A **cable** to connect the GPIO pins on the Pi to the MOSFET. It is best to solder your own using low-profile or angled plugs because space may be tight depending on where you will mount the Pi.
 
 
 ### Step 2: prepare the Raspberry Pi
 
-On your Pi, assuming you are running Raspbian Stretch or newer, you need to ensure the following Debian packages are installed. You can run `sudo aptitude` to install them in a console UI, or simply do `sudo apt-get install` followed by a space-separated list of the package names:
-* python3-scipy
-* python3-pyaudio
-* python3-cherrypy3
-* python3-requests-futures
-* python3-rpi.gpio
+The following assumes you are running the *Raspbian Stretch* or newer operating system on your Pi. Most likely you are, unless you installed it before July 2017. To verify, check whether the file */etc/debian_version* exists on the Pi and starts with at least *9.*<br>
+(If you are running something different for a specific reason, chances are you're knowledgeable enough to adapt the installation procedure to your own needs.)
 
-Next, copy the following files from this project to `/usr/local/bin/` on your Pi, and make them all executable:
-* beepdetect.py
-* pwm_server.py
-* shutdownpi
-* startpwmservices
-* stoppwmservices
+Installation is relatively simple. The required skills are opening a console or terminal on the Pi and inside it, navigating directories and executing commands. If you've attached a monitor and you are inside the desktop environment, you can launch the ‘Terminal’ program. If the Pi has a network connection and you enabled SSH (e.g. using raspi-config), you can also open an SSH connection from another computer. Tutorials about how to do these things should be easy to find.
 
-After logging in to the Pi and placing those files (and only those) in a folder ‘stuff’, you can get them in the right place with these commands:
+On the Pi, download and unzip this project's files. You only need the contents of the *pi_files* folder but simply downloading everything is easier. You can do this in any way and put the files anywhere you want, but you need to know where they are on the filesystem. Most practical is to put them directly in the home folder of the ‘pi’ user (*/home/pi*).
+
+Now make sure the USB audio device is plugged into the Pi. The next step is to run an installer script that puts all files in place. In your terminal or SSH console, go to the *pi_files* folder using the `cd` command and enter these commands:
 ```
-cd stuff
-chmod a+x *
-sudo mv * /usr/local/bin/
-```
-You also need to copy the *pwm_server* directory (with the CSS file inside it) into `/home/pi/`.
-
-Next, copy the *asound.conf* file to `/etc/asound.conf`. If you are using a different sound card, you may need to edit the ‘pcm’ value but it should work as-is if you build the system as described here.
-
-Now run: `beepdetect.py -L`<br>
-This will output a list of devices. Verify that the device called `micsnoop` has ID 4. If not, edit */usr/local/bin/startpwmservices* and set the value of `AUDIO_DEVICE` to the correct ID.
-
-Finally, add the following line before the “`exit 0`” line in `/etc/rc.local`. You need root permissions for this, for instance use: `sudo nano /etc/rc.local` or: `sudo vim.tiny /etc/rc.local` depending on your preferred editor.
-```
-/usr/local/bin/startpwmservices
+chmod 755 install.sh
+sudo ./install.sh
 ```
 
-Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, hostname, … You should also disable everything you don't need, for instance you should most likely disable the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
+If this script stops with an ‘ERROR’ message and you cannot figure out how to fix it, you can contact me directly or file an issue on GitHub. If it says *“Everything ready, now starting services,”* then you're good to go.
+
+Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, hostname, … You should also disable everything you don't need, like the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
 If you are really adamant on getting the best possible performance, you could install a real-time kernel. However, this seems overkill from my experiences so far.<br>
-How to do those things, is outside the scope of this guide. There is plenty of community support available for the Raspberry Pi!
+How to do those things is outside the scope of this guide. There is plenty of community support available for the Raspberry Pi!
 
-Originally I planned to add some kind of display with buttons or maybe a touchscreen, to be able to view and manipulate the status of the PWM controller. However, the only good display I found was more expensive than the Pi itself, and I realized that a smartphone or even a smartwatch also makes a fine wireless touch display, so I didn't bother.
+Originally I planned to add some kind of display with buttons or maybe a touchscreen, to be able to view and manipulate the status of the PWM controller. However, the only good display I found was more expensive than the Pi itself and I realized that a smartphone or even a smartwatch also makes a fine wireless touch display, so I didn't bother.
 
 
 ### Step 3: create the required parts
@@ -124,7 +107,7 @@ If you use a standard electret capsule as microphone, solder the ground/shield c
 [Cables (view larger image)](images/cables.jpg)
 
 Next, you need some 3D printed parts to mount the components:
-* a mount for the Raspberry Pi. If you mount it in the position I recommend below, [this mount](https://www.thingiverse.com/thing:2852432) should be optimal. Otherwise, you will need to design your own or use any other mount that works.
+* a mount for the Raspberry Pi. If you mount it in the position I recommend below, [this mount](https://www.thingiverse.com/thing:2852432) should be optimal. Otherwise you will need to design your own or use any other mount that works.
 * a mount for the MOSFET. If you use the ubiquitous IRF520 break-out board, [this Thing](https://www.thingiverse.com/thing:2852499) contains a suitable mount that uses the same 2.2mm self-tapping screws as the mount for the Pi.
 * An adaptor to mount the microphone onto the buzzer of the printer's main board. [This Thing](https://www.thingiverse.com/thing:2852499) offers two models that fit a standard 9.7 mm electret capsule: a half-open model and a closed one. As described above, the closed model can be used to mute most of the sound of the buzzer in case you don't want to hear the beep sequences, and don't care that other beeps like the start-up song will be muted as well. If you want to keep the buzzer sounds as they are, use the half-open model. It is recommended to print this adaptor in a flexible filament to dampen vibrations. If you are using a different model of microphone, again you will need to figure out something on your own, but make sure the mic is as close as possible to the buzzer and there is minimal contact with anything that vibrates.
 
@@ -150,7 +133,7 @@ If you haven't yet mounted a Raspberry Pi in your printer and you do not want to
 ![Overview](images/overview_small.jpg)<br>
 [Overview (view larger image)](images/overview.jpg)
 
-If you are using my 3D printed mount, you can stick it to the printer's housing with epoxy glue. You should first verify there is enough room for cables and plugs before fixing the position of the mount. By all means glue the mount while the Pi is inside it and the sound card is plugged into the Pi, otherwise there is no guarantee it will fit afterwards. This is also why you shouldn't use cyanoacrylate (super glue): it won't give you time to correct the position if you got it wrong.
+If you are using [my 3D printed mount](https://www.thingiverse.com/thing:2852432), you can stick it to the printer's housing with epoxy glue. You should first verify there is enough room for cables and plugs before fixing the position of the mount. By all means glue the mount with the Pi inside it and the sound card plugged into the Pi, otherwise there is no guarantee it will fit afterwards. This is also why you shouldn't use cyanoacrylate (super glue): it won't give you time to correct the position if you got it wrong.
 
 How you can mount the 5V power supply, will depend on its shape. In the overview photo you can see that my supply was small enough to simply tuck under a bundle of wires. I connected it to the mains voltage terminals of the main supply through part of an extension cable. This ensured a safe connection, as opposed to my first stupid idea of trying to wrap something around the plugs and covering them with shrink-wrap tubing, which I quickly abandoned when trying it in practice. If your idea seems vaguely dangerous, it most likely is and must not be attempted. In case of doubt, either ask assistance from someone more experienced with electronics or keep the power supply outside your printer and plug it into a regular power socket.
 
