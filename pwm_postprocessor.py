@@ -927,6 +927,6 @@ gcode.stop()
 if gcode.m126_7_found:
     # I might offer a fallback mode that treats those commands as M106 with a default speed.
     # This should be explicitly enabled via a CLI argument, otherwise this warning must appear.
-    LOG.warning("WARNING: M126 and/or M127 command(s) were found inside the body of the G-code. \
+    LOG.warning("M126 and/or M127 command(s) were found inside the body of the G-code. \
 Most likely, your fan will not work for this print. Are you sure your slicer is outputting \
 G-code with M106 commands (e.g. RepRap G-code flavor)?")
