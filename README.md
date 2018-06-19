@@ -14,9 +14,9 @@ by Alexander Thomas, aka Dr. Lex
 
 It is possible to recompile Sailfish firmware with a software PWM implementation on the EXTRA output, but this is only a static control that cannot be changed mid-print, and it cannot be controlled through G-code commands either. Installing a simple manual hardware PWM controller is actually a better option because that will at least allow to change the PWM at any time, but it remains cumbersome. I have done this for a few months until I got tired of having to babysit every print. I wanted fully automatic fan control from within the X3G file itself.
 
-I have looked for sensible ways to implement PWM for the fan, in such a way that it could be controlled from within G-code, preferably with manual override. Ideally, the printer should send desired fan speed to a separate device like an Arduino or Raspberry Pi, which does the actual PWM. I found no straightforward way to do this however, so I went for something *less sensible* instead. This solution relies on the **buzzer,** which from my experiments has proven to be a reliable one-way communication channel. Not only does it play tones with accurate timings, it also plays them exactly where they occur inside the print code, unlike the M126 and M127 commands that will toggle the EXTRA output at a rather unpredictable time before the command is expected to be executed. This makes the buzzer suitable for making a *modem connection* to an external controller.
+I have looked for sensible ways to implement PWM for the fan, in such a way that it could be controlled from within G-code, preferably with manual override. Ideally, the printer should send desired fan speed to a separate device like an Arduino or Raspberry Pi, which does the actual PWM. I found no straightforward way to do this however, so I went for something *less sensible* instead. This solution relies on the **buzzer,** which from my experiments has proven to be a reliable one-way communication channel. Not only does it play tones with accurate timings, it also plays them exactly where they occur inside the print code, unlike the M126 and M127 commands that will toggle the EXTRA output at a rather unpredictable time before the command is expected to be executed. This makes the buzzer suitable for setting up a *modem connection* to an external controller.
 
-To make all this work, you need some minimal understanding of Linux, and at least basic electronics skills. Being able to solder might not be essential, but will make it much easier than trying to find ready-made cables that will fit. While working on the internals of your printer, take the usual precautions for working on delicate electronics: avoid static discharges and short-circuits.
+To make all this work, you need some minimal understanding of how to use Linux on a Raspberry Pi, and at least basic electronics skills. Being able to solder might not be essential but will make it much easier than trying to find ready-made cables that will fit. While working on the internals of your printer, take the usual precautions for working on delicate electronics: avoid static discharges and short-circuits.
 
 This has so far only been tested with *Slic3r,* and quite likely the post-processing script that generates the beep sequences will only work with Slic3r-generated G-code at this moment. Of course, the main reason why I have published this on GitHub is to make it easy for anyone to modify the code and submit pull requests to make it work with other slicer programs.
 
@@ -198,6 +198,8 @@ In the Tools folder there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that pla
 
 Last but not least, if you previously neglected fan speed values in your slicer profiles (as you should have), now is the time to go through them again and try to enter sensible values. Optimal values will differ between each filament and also depend on what kind of extruder, nozzle, and cooling duct you are using. Be prepared to experiment and tweak! Also be prepared to be amazed at how much of a quality improvement proper cooling can provide.
 
+This system is compatible with version 7 or newer of my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html) to improve dual extrusion prints on the FFCP.
+
 
 ## Technical details
 
@@ -212,7 +214,7 @@ The IRF520 MOSFET is theoretically capable of drawing up to 9 A of current. How
 
 ## Current Issues
 
-**Important:** the script in its current state is not yet aware of dual extrusion. It will especially not work with my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html).
+There still seems to be a very tiny risk that a detection may be missed (judging from my tests, the risk is perhaps 1 in 2000). I plan to redesign the detection logic to be more robust.
 
 If you would be running your own custom build based on the very latest Sailfish master branch, you will run into a problem caused by the ‘hammerfix’ commits by *dbavatar* from around July 2016: M300 commands (to play beeps) cause a significant pause in the print, and the sequences are played with sloppier timings that can cause beepdetect.py to miss them. I have made a [pull request](https://github.com/jetty840/Sailfish-MightyBoardFirmware/pull/202) that nearly eliminates the pauses by improving SD card reading efficiency. The sloppy beep playback is still a problem but I plan to rewrite the detection algorithm in beepdetect.py anyway such that it is more robust. For those who do want to try the hammer fix, ask and I'll make a build that includes it. You should first try [my other custom build]((https://github.com/DrLex0/Sailfish-MightyBoardFirmware/releases/tag/20180505)) however, perhaps the included SD card reading improvement will already provide the performance boost you're looking for.
 
