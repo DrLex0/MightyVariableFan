@@ -75,7 +75,7 @@ SEQUENCE_LENGTH = 3
 #### End of configuration section ####
 
 
-VERSION = '0.2'
+VERSION = '0.3'
 
 # Number of lines in the buffers. More allows to cope with more detailed and faster prints, but
 # is slower and requires more memory to process. If you need more than 128, you're probably
@@ -204,12 +204,12 @@ class GCodeStreamer(object):
         if found_f:
             xyzfd2[3] = float(found_f.group(1))
 
-        # TODO: G4 command can be directly converted to time (but should be rare in actual prints)
-        # TODO: tool changes (should be assumed to take ridiculously long)
         time_estimate = 0.0
         # Assumption to simplify logic and calculations: Z component in a combined XYZ move has
         # a negligible time contribution compared to XY.
         if found_x or found_y:
+            # TODO: better approximate time by considering acceleration, doesn't need to be
+            # perfect but currently there are situations where the estimate deviates a lot.
             time_estimate = (math.hypot(xyzfd2[0] - self.xyzfd[0], xyzfd2[1] - self.xyzfd[1]) *
                              self.feed_factor / xyzfd2[3])
         elif found_z:
@@ -246,6 +246,10 @@ class GCodeStreamer(object):
             time_estimate = self._update_print_state(line)
         elif re.match(r"(M126|M127)(\s|;|$)", line):
             self.m126_7_found = True
+        elif re.match(r"(M109|M116|M190|M6|T\d+)(\s|;|$)", line):
+            # Treat 'wait for' as well as tool change commands as taking very long, such that
+            # lead time will never cause fan sequences to jump across them.
+            time_estimate = 10.0
         elif line.startswith(END_MARKER):
             self.end_of_print = True
         else:
@@ -257,7 +261,12 @@ class GCodeStreamer(object):
                 duty_cycle = 0.0
                 if fan_command.group(1) == "M106" and fan_command.group(3):
                     duty_cycle = float(fan_command.group(3))
-            self.xyzfd[4] = duty_cycle
+                self.xyzfd[4] = duty_cycle
+            else:
+                # S argument is not supported (at least not by GPX)
+                dwell_command = re.match(r"G4\s+P(\d?\.?\d+)", line)
+                if dwell_command:
+                    time_estimate = float(dwell_command.group(1)) / 1000
 
         if ahead:
             self.buffer_ahead.append((line, self.xyzfd[2], duty_cycle, time_estimate))
@@ -495,7 +504,12 @@ class GCodeStreamer(object):
         """Try to split up the move at @position such that the second part takes approximately
         @time2 seconds.
         The return value is a boolean indicating whether the move could be split. Splitting
-        fails if the starting coordinates for this move could not be found before @position."""
+        fails if the starting coordinates for this move could not be found before @position,
+        or it is not an actual move (G1 command)."""
+        data = self.buffer[position]
+        if not re.match(r"[^;]*G1(\s|;|$)", data[0]):
+            return False
+
         # Inefficient but acceptable because it should only be done a few times. The alternative
         # would be to keep track of previous X, Y for every line in the buffer, which would make
         # the script much slower overall.
@@ -503,7 +517,6 @@ class GCodeStreamer(object):
         if not start_xy:
             return False
 
-        data = self.buffer[position]
         fraction = 1.0 - (time2 / data[3])
         if DEBUG:
             assert fraction > 0
