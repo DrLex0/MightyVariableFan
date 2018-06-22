@@ -298,7 +298,7 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
             return GpioServer.html(
                 "Confirm shutdown",
                 ("<p>Really shutdown the {}?</p>".format(self.machine_name) +
-                 "<p><a href='/shutdown?token={}'>Yes</a>&nbsp; <a href='/'>No!</a></p>".format(
+                 "<p><a href='/shutdown?token={}'>Yes</a>&nbsp; <a href='/' class='big'>No!</a></p>".format(
                      self.shutdown_token)))
 
     @staticmethod
