@@ -260,11 +260,17 @@ def seq_to_value(sequence):
         value += 4 ** i * sequence[-(i+1)]
     return value
 
+def make_duty_request(futures, session, options, duty):
+    """Append to the @futures deque an asynchronous request to the PWM server for changing
+    the duty cycle."""
+    futures.append(
+        session.get('http://{}:{}/setduty?d={}&basic=1'.format(
+                        options.ip, options.port, duty),
+                    timeout=options.timeout))
+
 def start_detecting(options):
     """Run the main detection loop."""
     server_ip = options.ip
-    server_port = options.port
-    request_timeout = options.timeout
     sensitivity = options.sensitivity
 
     # To avoid having to do time system calls which may be expensive and return non-monotonic
@@ -289,9 +295,9 @@ def start_detecting(options):
     # 1, warn early if the server isn't running;
     # 2, ensure the server is in enabled state;
     # 3, ensure these bits of code are already cached when we need to do our first real request.
-    attempts = 3
-    while server_ip and attempts:
-        future = session.get('http://{}:{}/enable?basic=1'.format(server_ip, server_port))
+    attempts_left = 3
+    while server_ip and attempts_left:
+        future = session.get('http://{}:{}/enable?basic=1'.format(server_ip, options.port))
         try:
             req = future.result()
             if req.status_code == 200:
@@ -301,9 +307,9 @@ def start_detecting(options):
                 LOG.error("Test request to PWM server failed with status %s", req.status_code)
         except requests.ConnectionError as err:
             LOG.error("The PWM server may be down? %s", err)
-        attempts -= 1
-        LOG.error("Attempts left: %d", attempts)
-        if attempts:
+        attempts_left -= 1
+        LOG.error("Attempts left: %d", attempts_left)
+        if attempts_left:
             sleep(2)
 
     LOG.info("Beep sequence detector started.")
@@ -320,6 +326,7 @@ def start_detecting(options):
     detections = DetectionState()
     last_peak = None
     peak_count = 0
+    current_duty = None
     in_stream = open_input_stream(audio, options)
 
     while True:
@@ -359,12 +366,22 @@ def start_detecting(options):
             if future_countdowns[0] < 1:
                 future_countdowns.popleft()
                 future = futures.popleft()
+                success = False
                 try:
                     req = future.result()
                     if req.status_code != 200:
                         LOG.error("Request to PWM server failed with status %d", req.status_code)
+                    else:
+                        success = True
                 except requests.ConnectionError as err:
                     LOG.error("Could not connect to PWM server: %s", err)
+                if not success and not future_countdowns and attempts_left:
+                    # The request failed and no newer ones are queued. Because things are handled
+                    # in a sequential manner, there is no risk of a race condition by retrying.
+                    LOG.info("Retrying the request, %d attempts left", attempts_left)
+                    future_countdowns.append(request_countdown)
+                    make_duty_request(futures, session, options, current_duty)
+                    attempts_left -= 1
 
         if DETECT_CONTINUOUS:
             # Find the peak frequency. If the same one occurs loud enough for long enough,
@@ -406,12 +423,10 @@ def start_detecting(options):
                 continue
             last_bins = empty_bins[:]
             if duty is not False and server_ip:
+                current_duty = duty
                 future_countdowns.append(request_countdown)
-                futures.append(
-                    session.get(
-                        'http://{}:{}/setduty?d={}&basic=1'.format(
-                            server_ip, server_port, duty),
-                        timeout=request_timeout))
+                make_duty_request(futures, session, options, duty)
+                attempts_left = 2
         else:  # 1 signal
             harmonic_ratio = total_bins[len(SIG_BINS) + signals[0]] / total_bins[signals[0]]
             if harmonic_ratio > HARMONIC_FACTOR:
