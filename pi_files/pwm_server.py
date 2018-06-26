@@ -192,7 +192,7 @@ class GpioServer(object):
         # TODO: increment/decrement buttons next to presets, or replace presets with a slider
         # Also useful: scale factor for incoming requests
         pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty)
-                       for duty in [0, 10, 20, 25, 30, 35, 40, 50, 65, 75, 100]]
+                       for duty in [0, 10, 20, 25, 30, 35, 40, 50, 60, 70, 75, 80, 90, 100]]
         shutdown = "<br><a href='/'>Refresh</a>&nbsp; <a href='/shutdown'>Shutdown</a>"
 
         return GpioServer.html(
