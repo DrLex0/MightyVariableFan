@@ -62,7 +62,7 @@ DETECTOR_LOCK_FILE = "/run/lock/beepdetect.lock"
 #### End of configuration section ####
 
 
-class PWMController(object):
+class PWMController:
     """Allows to control a GPIO pin on the Raspberry Pi with PWM output, with support for
     'kickstarting' the output to help with starting at low target speeds, and faster
     transitioning to higher speeds."""
@@ -87,7 +87,7 @@ class PWMController(object):
         """Sets the duty cycle of the output. Global kickstart behavior can be overridden
         by passing a boolean in kick_override."""
         if duty:
-            do_kickstart = kick_override if kick_override != None else self.kickstart
+            do_kickstart = kick_override if kick_override is not None else self.kickstart
             # Don't bother with kickstart if the target DC is near 1 anyway
             if do_kickstart and duty > self.duty and duty < 95.0:
                 kick_duration = (duty - self.duty) * self.kick_factor
@@ -118,7 +118,7 @@ class PWMController(object):
         GPIO.cleanup()
 
 
-class GpioServer(object):
+class GpioServer:
     """Handles HTTP requests to control the PWM output."""
 
     def __init__(self, config, ramp_up_test=False):
@@ -127,6 +127,7 @@ class GpioServer(object):
         If @ramp_up_test, the PWM will be sweeped from zero to max upon startup."""
         self.override = False
         self.duty = 0.0
+        self.scale_mult = 1.0
         self.active = False
         self.pwm = PWMController(config)
         self.pwm_min_dc = config.minimum_dc
@@ -136,12 +137,21 @@ class GpioServer(object):
         if ramp_up_test:
             self.pwm_ramp_up_test()
 
+    def update_pwm_duty(self):
+        """Sets the actual PWM duty cycle according to server state, i.e. active state,
+        the last set duty cycle, and the scale multiplier."""
+        if not self.active:
+            self.pwm.set_duty(0.0)
+            return
+        duty = self.duty * self.scale_mult
+        self.pwm.set_duty(duty if duty < 100.0 else 100.0)
+
     def pwm_ramp_up_test(self):
         """Sweeps the PWM from zero to max over 3 seconds, then returns to previous level."""
         for i in range(0, 101, 5):
             self.pwm.set_duty(i, kick_override=False)
             time.sleep(0.15)
-        self.pwm.set_duty(self.duty)
+        self.update_pwm_duty()
 
     def shutdown_machine(self):
         """Initiate a shutdown of the machine this script runs on."""
@@ -168,39 +178,49 @@ class GpioServer(object):
         This should be be a simple page that can be used to control all basic functions of the
         server from a smallish touch display.
         TODO: create a much nicer UI that always stretches itself across small screens."""
-        active = "True" if self.active else "<span class='warn'>False</span>"
+        active = "active" if self.active else "<span class='warn'>inactive</span>"
         if basic:
+            scaled = ", scale {:.2f}".format(self.scale_mult) if self.scale_mult != 1.0 else ""
             return GpioServer.html(
                 "PWM Server",
-                "PWM status: active = {}, duty cycle = <b>{:.2f}</b>".format(active, self.duty))
+                "PWM status: {}, duty cycle = <b>{:.2f}</b>{}".format(
+                    active, self.duty, scaled))
 
         if self.active:
-            pwm_toggle = "<a href='/disable?manual=1'>Disable PWM</a>"
+            pwm_toggle = "<a href='/disable?manual=1'>disable</a>"
         else:
-            pwm_toggle = "<a href='/enable?manual=1'>Enable PWM</a>"
+            pwm_toggle = "<a href='/enable?manual=1'>enable</a>"
 
-        override = "<span class='warn'>True</span>" if self.override else "False"
+        override = "<span class='warn'>ON</span>" if self.override else "off"
         if self.override:
-            manual_toggle = "<a href='/man_override?enable=0'>Disable manual override</a>"
+            manual_toggle = "<a href='/man_override?enable=0'>disable</a>"
         else:
-            manual_toggle = "<a href='/man_override?enable=1'>Enable manual override</a>"
+            manual_toggle = "<a href='/man_override?enable=1'>enable</a>"
 
         detector_warning = ""
         if not os.path.exists(DETECTOR_LOCK_FILE):
             detector_warning = "<br><span class='warn'>Warning: beepdetect is not running!</span>"
 
         # TODO: increment/decrement buttons next to presets, or replace presets with a slider
-        # Also useful: scale factor for incoming requests
         pwm_presets = ["<a href='/setduty?d={d}&manual=1'>[{d}%]</a>".format(d=duty)
                        for duty in [0, 10, 20, 25, 30, 35, 40, 50, 60, 70, 75, 80, 90, 100]]
         shutdown = "<br><a href='/'>Refresh</a>&nbsp; <a href='/shutdown'>Shutdown</a>"
+        scaler = "1.000" if self.scale_mult == 1.0 else "<b>{:.3f}</b>".format(self.scale_mult)
+        scaler = "Scale <b><a href='/scale?factor=0.95238'>– –</a></b> {} "\
+                 "<b><a href='/scale?factor=1.05'>+ +</a></b>&nbsp;&nbsp; "\
+                 "<a href='/scale?reset=1'>(↺)</a><br>".format(scaler)
+        effective_duty = self.duty * self.scale_mult
+        if effective_duty > 100.0:
+            effective_duty = 100.0
+        scaled = " ({:.2f} scaled)".format(effective_duty) if self.scale_mult != 1.0 else ""
 
         return GpioServer.html(
             "PWM Server on {}".format(self.machine_name),
-            ("PWM status: active = {}, duty cycle = <b>{:.2f}</b>, ".format(active, self.duty) +
-             "manual override = {}<br>{}<br>{}<br>Set duty: {}<br>{}{}".format(
-                 override, pwm_toggle, manual_toggle, " ".join(pwm_presets), detector_warning,
-                 shutdown)))
+            ("PWM status: {} [{}]<br>".format(active, pwm_toggle) +
+             "Manual override: {} [{}]<br>".format(override, manual_toggle) +
+             "Duty cycle = <b>{:.2f}</b>{}<br>".format(self.duty, scaled) +
+             "Set duty: {}<br>{}{}{}".format(" ".join(pwm_presets), scaler,
+                                             detector_warning, shutdown)))
 
     @staticmethod
     def needs_override():
@@ -237,21 +257,45 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
         if self.override and not manual:
             return GpioServer.needs_override()
 
-        if duty_value > 0 and duty_value < self.pwm_min_dc:
+        if 0 < duty_value < self.pwm_min_dc:
             duty_value = self.pwm_min_dc
         self.duty = duty_value
-        if self.active:
-            self.pwm.set_duty(self.duty)
+        self.update_pwm_duty()
         return self.server_status(basic)
+
+    @cherrypy.expose
+    def scale(self, factor=1.05, reset=None):
+        """Multiplies the current scale multiplier by the given @factor with 0 < @factor < 100.
+        Both the current duty cycle as well as any future incoming ones (manual or not)
+        will be scaled by the resulting global multiplier.
+        Because this is only meant for manual override, there is no 'manual' or
+        'basic' argument.
+        If @reset evaluates to True, @factor is ignored and the multiplier is reset to 1.0."""
+        try:
+            scale_value = float(factor)
+            if scale_value <= 0 or scale_value >= 100:
+                raise ValueError("value out of range")
+        except ValueError as err:
+            raise cherrypy.HTTPError(
+                422,
+                ("Invalid value '{}' for factor parameter: ".format(factor) +
+                 "it must be a number larger than 0.0 and less than 100.0 ({})".format(err)))
+        if reset:
+            self.scale_mult = 1.0
+        else:
+            self.scale_mult *= scale_value
+            if round(self.scale_mult, 3) == 1.0:
+                self.scale_mult = 1.0
+        self.update_pwm_duty()
+        return self.server_status()
 
     @cherrypy.expose
     def enable(self, manual=None, basic=None):
         """Enables the PWM output, resuming any previously set duty cycle."""
         if self.override and not manual:
             return GpioServer.needs_override()
-        if not self.active:
-            self.pwm.set_duty(self.duty)
         self.active = True
+        self.update_pwm_duty()
         return self.server_status(basic)
 
     @cherrypy.expose
@@ -259,16 +303,15 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
         """Disables the PWM output."""
         if self.override and not manual:
             return GpioServer.needs_override()
-        if self.active:
-            self.pwm.set_duty(0)
         self.active = False
+        self.update_pwm_duty()
         return self.server_status(basic)
 
     @cherrypy.expose
     def man_override(self, enable):
         """Enables or disables the manual override mode."""
-        # Weird: this does NOT work with plain 'override' as path. Apparently this is somehow
-        # hard-coded in CherryPy?
+        # Why not just 'override' as path? Because there is already a member variable with
+        # that name and this causes CherryPy to not recognize it as a path.
         self.override = True if enable and enable != "0" else False
         return self.server_status()
 
@@ -292,14 +335,14 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
                 "Shutdown request ignored",
                 ("<p>Invalid shutdown token. Your browser may be trying to reload an old page.</p>"
                  + "<p><a href='/'>Return to main page</a></p>"))
-        else:
-            self.shutdown_token = "".join(
-                random.choice(string.ascii_lowercase + string.digits) for _ in range(16))
-            return GpioServer.html(
-                "Confirm shutdown",
-                ("<p>Really shutdown the {}?</p>".format(self.machine_name) +
-                 "<p><a href='/shutdown?token={}'>Yes</a>&nbsp; <a href='/' class='big'>No!</a></p>".format(
-                     self.shutdown_token)))
+
+        self.shutdown_token = "".join(
+            random.choice(string.ascii_lowercase + string.digits) for _ in range(16))
+        return GpioServer.html(
+            "Confirm shutdown",
+            ("<p>Really shutdown the {}?</p>".format(self.machine_name) +
+             "<p><a href='/shutdown?token={}'>Yes</a>&nbsp; ".format(self.shutdown_token) +
+             "<a href='/' class='big'>No!</a></p>"))
 
     @staticmethod
     def html(title, body):
