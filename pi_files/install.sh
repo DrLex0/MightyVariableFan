@@ -23,13 +23,14 @@ fatal() {
 	exit 1
 }
 
-[[ $EUID -ne 0 ]] && fatal "this script requires root privileges. Try 'sudo $0' instead."
+# Echoing $@ would be problematic if arguments would need to be quoted,
+# luckily this is not the case here.
+[[ $EUID -ne 0 ]] && fatal "this script requires root privileges. Try 'sudo $0 $@' instead."
 
 
 if [ -n "$1" ]; then
 	if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-		echo "Error: optional argument must be a port number, like 8081" >&2
-		exit 2
+		fatal "Error: optional argument must be a port number, like 8081"
 	fi
 	SERVER_PORT=$1
 fi
