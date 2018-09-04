@@ -1,6 +1,7 @@
 #!/bin/bash
 # This is the installer script to deploy MightyVariableFan scripts and configuration on a Raspberry Pi.
 # This needs to be executed with root permissions (sudo).
+# Optional argument: custom port number for the PWM server.
 #
 # Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
 # Released under Creative Commons Attribution 4.0 International license.
@@ -25,6 +26,15 @@ fatal() {
 [[ $EUID -ne 0 ]] && fatal "this script requires root privileges. Try 'sudo $0' instead."
 
 
+if [ -n "$1" ]; then
+	if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+		echo "Error: optional argument must be a port number, like 8081" >&2
+		exit 2
+	fi
+	SERVER_PORT=$1
+fi
+
+
 echo "=== Stopping any running instances of the daemons..."
 [ -x $STOP_SCRIPT ] && $STOP_SCRIPT
 
@@ -42,7 +52,7 @@ cp ${BINARIES[*]} /usr/local/bin/
 echo "=== Installing static web server files..."
 chown -R pi:pi pwm_server
 chmod -R go-w,a-x+X pwm_server  # sanitize permissions
-cp -r pwm_server /home/pi/
+cp -pr pwm_server /home/pi/
 
 
 echo "=== Determining ALSA device for the microphone..."
@@ -78,6 +88,12 @@ pcm_id=$($BEEPDETECT -L 2>/dev/null | grep -o 'Input Device id .*: micsnoop' | a
 
 echo "Setting microphone device ID to ${pcm_id}"
 sed -i "s/^AUDIO_DEVICE=.*$/AUDIO_DEVICE=${pcm_id}/" $START_SCRIPT
+
+
+if [ -n "${SERVER_PORT}" ]; then
+	echo "=== Setting custom server port ${SERVER_PORT}..."
+	sed -i "s/^SERVER_PORT=.*$/SERVER_PORT=${SERVER_PORT}/" $START_SCRIPT
+fi
 
 
 echo "=== Everything ready, now starting services..."

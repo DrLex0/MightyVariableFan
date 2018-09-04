@@ -95,6 +95,8 @@ chmod 755 install.sh
 sudo ./install.sh
 ```
 
+By default the PWM server will run on TCP port 8081. If you want to change this because something else is already running on that port, pass the desired port number as argument to the install command, e.g.: `sudo ./install.sh 8082`
+
 If this script stops with an ‘ERROR’ message and you cannot figure out how to fix it, you can contact me directly or file an issue on GitHub. If it says *“Everything ready, now starting services,”* then you're good to go.
 
 Before mounting the Pi in your printer, you should also configure everything else to your likings, for instance the WiFi connection, SSH access with public key, hostname, … You should also disable everything you don't need, like the graphical X environment unless you really need it for an attached display. Anything that could produce an unpredictable burst of activity should be disabled to avoid interference with the beep detector.<br>
@@ -125,7 +127,7 @@ Next, you need some 3D printed parts to mount the components:
 
 Before mounting everything, it is a good idea to do a sanity check of the whole system outside the printer. The nice thing about the typical IRF520 board is that it has an LED on it that will light up if there is a signal on its GPIO input, even if nothing else is connected. Plug the sound card into the Pi and connect the MOSFET to the GPIO. The GPIO pins #12 (GPIO 18) and #14 (ground) must be connected respectively to the ‘SIG’ and ‘GND’ contacts of the MOSFET board ([here](https://www.raspberrypi.org/documentation/usage/gpio/) is documentation about the GPIO pins).
 
-Next, power up the Pi. After a few seconds, you should see the LED on the IRF520 board light up momentarily. If you enter the Pi's IP address on port 8080 in a browser (e.g. `http://192.168.12.34:8080/`), you should see the interface of the PWM server and be able to change the intensity of the LED by choosing different duty cycles.
+Next, power up the Pi. After a few seconds you should see the LED on the IRF520 board light up momentarily. If in a browser you enter the Pi's IP address on port 8081 or the custom port number you configured (e.g. `http://192.168.12.34:8081/`), you should see the interface of the PWM server and be able to change the intensity of the LED by choosing different duty cycles.
 
 Next, log into the Pi through SSH and run:
 ```
@@ -155,7 +157,7 @@ When you power on the printer and Pi, after a few seconds you should see the fan
 
 ### Step 6: calibrating
 
-When everything has been installed and set up, the last step is to calibrate the beep detector. This is *crucial* because if it is misconfigured, some fan speed changes may be missed and prints may get cooled at too high or low speed or not at all.
+When everything has been installed and set up, the last step is to calibrate the beep detector. This step is **crucial** because if the system is not properly configured, fan speed changes may be missed and prints may get cooled at too high or low speed or not at all.
 
 The most important thing to configure is the *input gain* of the USB sound card. You can do this with `alsamixer` on the Pi. Inside the alsamixer UI, press *F6* to select the USB sound card (most likely the last one in the list). Next, press *F5* to show all controls (or F4 for capture, but this doesn't always work). The cheap ‘3D sound’ card only has one ‘capture’ control, select it with left/right arrow keys. If it doesn't read ‘CAPTURE’ in red below the indicator bar, press the space bar. The gain is adjusted with arrow up and down keys. Start out by cranking up the gain to the maximum (100).
 
@@ -200,7 +202,7 @@ Once the script has been configured, you can either manually run it on every G-c
 **Note:** even though you should reconfigure your slicer to output RepRap-flavor G-code, the GPX program to convert G-code into X3G must still be configured to output code for your specific printer model (e.g. `-m fcp` for the FlashForge Creator Pro)!
 
 ### Web interface
-During a print you can observe the current PWM duty cycle and manipulate it if you wish, by opening the PWM web server interface on a computer, tablet or smartphone. The default address is `http://your.RPi.address:8080/`. The interface is currently still very crude but should be self-explanatory. Next to setting some fixed PWM preset values, you can also increase or decrease a **scale factor** in 5% steps. This factor will be applied to every incoming PWM value, which can be useful if you notice you have configured too low or high fan speeds for a print. The interface also allows to *shut down the Pi cleanly.* This is not terribly important but recommended if the Pi's power supply is behind the same switch as the printer's. It is better to perform a clean shutdown than simply pulling the power. Wait at least 15 seconds for the Pi to shut down before disconnecting the mains.
+During a print you can observe the current PWM duty cycle and manipulate it if you wish, by opening the PWM web server interface on a computer, tablet or smartphone. The default address is `http://your.RPi.address:8081/`. (Port number may be different if you changed it.) The interface is currently still very crude but should be self-explanatory. Next to setting some fixed PWM preset values, you can also increase or decrease a **scale factor** in 5% steps. This factor will be applied to every incoming PWM value, which can be useful if you notice you have configured too low or high fan speeds for a print. The interface also allows to *shut down the Pi cleanly.* This is not terribly important but recommended if the Pi's power supply is behind the same switch as the printer's. It is better to perform a clean shutdown than simply pulling the power. Wait at least 15 seconds for the Pi to shut down before disconnecting the mains.
 
 ### Tools and tweaks
 In the Tools folder there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that play the sequences for disabling the fan and setting it to 100%. These are useful for several things:
