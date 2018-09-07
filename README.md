@@ -89,6 +89,8 @@ Installation is relatively simple. The required skills are opening a console or 
 
 On the Pi, download and unzip this project's files, or clone the repository with the `git` command. You only need the contents of the *pi_files* folder but simply downloading everything is easier. You can do this in any way and put the files anywhere you want, but you need to know where they are on the filesystem. Most practical is to put them directly in the home folder of the ‘pi’ user (*/home/pi*).
 
+Upgrade the software on your Pi to the latest versions, especially if it was installed long ago and never updated since. You can do this in several ways, for instance use *Update* in `raspi-config`, or: `sudo apt-get update; sudo apt-get upgrade`. This can take a while if you haven't updated in a while. It is recommended to reboot afterwards.
+
 Now make sure the USB audio device is plugged into the Pi. The next step is to run an installer script that puts all files in place. In your terminal or SSH console, go to the *pi_files* folder using the `cd` command and enter these commands:
 ```
 chmod 755 install.sh

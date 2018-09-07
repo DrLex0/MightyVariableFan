@@ -451,6 +451,9 @@ def calibration(options):
     global_divider = 0
     clipped = False
 
+    audio = pyaudio.PyAudio()
+    chunks_recorded = 0
+
     LOG.info("==== Calibration mode ====")
     LOG.info("""You should now 'print' a file that plays each of the 4 beep signals
     repeatedly an equal number of times. Make sure the printer does not play
@@ -464,9 +467,7 @@ def calibration(options):
     LOG.info("Intensities for the %s signal frequencies if any exceeds %g:",
              len(SIG_BINS), sensitivity)
 
-    audio = pyaudio.PyAudio()
     in_stream = open_input_stream(audio, options)
-    chunks_recorded = 0
     start_time = time()
 
     try:
@@ -516,7 +517,7 @@ def calibration(options):
              float(SAMPLING_RATE)/NUM_SAMPLES)
     speed_factor = (chunks_recorded * NUM_SAMPLES) / (float(SAMPLING_RATE) * elapsed_time)
     if elapsed_time < 20:
-        LOG.warning("""Calibration time was too short to get an accurate measure.
+        LOG.error("""Calibration time was too short to get an accurate measure.
     Try running it again for at least 20 seconds.""")
     elif speed_factor < 0.85:
         if speed_factor < 0.7:
