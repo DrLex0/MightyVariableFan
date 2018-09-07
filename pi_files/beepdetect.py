@@ -508,17 +508,34 @@ def calibration(options):
         LOG.info("-----")
         LOG.info("Exiting calibration mode and generating statistics...")
 
-    LOG.info("%d chunks in %d seconds = %.3f/s",
+    LOG.info("Performance check: %d chunks in %d seconds = %.3f/s",
              chunks_recorded,
              elapsed_time,
              chunks_recorded/elapsed_time)
-    LOG.info("  If this is significantly lower than %.3f, you're in trouble.",
+    LOG.info("  This must be very close to %.3f.",
              float(SAMPLING_RATE)/NUM_SAMPLES)
+    speed_factor = (chunks_recorded * NUM_SAMPLES) / (float(SAMPLING_RATE) * elapsed_time)
+    if elapsed_time < 20:
+        LOG.warning("""Calibration time was too short to get an accurate measure.
+    Try running it again for at least 20 seconds.""")
+    elif speed_factor < 0.85:
+        if speed_factor < 0.7:
+            LOG.error("This is WAY TOO SLOW!")
+        else:
+            LOG.error("This is too slow! Try running calibration for a longer time.")
+        LOG.error("""Either your model of Pi is too old to run this, or something else is
+    consuming so much CPU and I/O that the script is starved of resources.
+    Consult the README for instructions""")
+    elif speed_factor < 0.95:
+        LOG.warning("""This is slightly too slow. Try running calibration for a longer time
+    to get a better measurement. If it remains too low, consult the README.""")
+    else:
+        LOG.info("  Looks OK.")
 
     if clipped:
         LOG.warning("Too loud signal has been detected. If only valid beep sequences were \
-  played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other \
-  sounds than the PWM sequences.)")
+played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other \
+sounds than the PWM sequences.)")
 
     avg_bin_intensities = [sum_sig_bins[i] / max(count_sig_bins[i], 1)
                            for i in range(1, len(sum_sig_bins), 3)]
