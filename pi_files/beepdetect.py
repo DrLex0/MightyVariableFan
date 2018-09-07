@@ -51,7 +51,7 @@ from time import sleep, time
 import pyaudio
 import requests
 # pylint: disable=no-name-in-module
-from numpy import short, fromstring, zeros
+from numpy import short, frombuffer, zeros
 from scipy import fft
 from requests_futures.sessions import FuturesSession
 
@@ -346,7 +346,7 @@ def start_detecting(options):
                 sleep(0.005)
 
         try:
-            audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
+            audio_data = frombuffer(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
                                     dtype=short)
         except IOError as err:
             # I could restart the stream here, but the above except catcher already does it anyway.
@@ -474,7 +474,7 @@ def calibration(options):
             while in_stream.get_read_available() < NUM_SAMPLES:
                 sleep(0.005)
             try:
-                audio_data = fromstring(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
+                audio_data = frombuffer(in_stream.read(NUM_SAMPLES, exception_on_overflow=True),
                                         dtype=short)
                 chunks_recorded += 1
             except IOError as err:
