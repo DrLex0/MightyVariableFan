@@ -67,6 +67,11 @@ If you're not afraid of soldering on your printer's main board, you can omit the
 Yes it is. I have been using it for many months now and despite the few glitches mentioned in the ‘current issues’, it works incredibly well.
 
 
+### Can I run something else on the same Raspberry Pi?
+
+It depends. If the other process consumes a lot of CPU or I/O load, then it risks interfering with the real-time operation of the beep detection. So far someone has reported trying to run this system on the same Pi as Octoprint, and this *failed* because the beep detector couldn't reach the required performance. There was no obvious cause (the octoprint process did not cause an excessive load), but it was a pre-made custom Octoprint Raspbian image which might have contained modifications that interfere with the USB sound card. In other words your mileage may vary. Safest is to use a dedicated Raspberry Pi for the fan system, they are cheap anyway…
+
+
 ## Installing
 
 ### Step 1: gather the required hardware
