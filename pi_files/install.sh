@@ -13,15 +13,37 @@ REQUIRED_PACKAGES=(python3-scipy python3-pyaudio python3-cherrypy3 python3-reque
 # Everything that belongs in /usr/local/bin
 BINARIES=(beepdetect.py pwm_server.py shutdownpi startpwmservices stoppwmservices)
 
-START_SCRIPT=/usr/local/bin/startpwmservices
-STOP_SCRIPT=/usr/local/bin/stoppwmservices
-BEEPDETECT=/usr/local/bin/beepdetect.py
+DEFAULTS='/etc/default/mightyvariablefan'
+START_SCRIPT='/usr/local/bin/startpwmservices'
+STOP_SCRIPT='/usr/local/bin/stoppwmservices'
+BEEPDETECT='/usr/local/bin/beepdetect.py'
 
 
 fatal() {
 	echo -e "\033[0;31mERROR: $1\033[0m" 1>&2
 	exit 1
 }
+
+write_defaults()
+{
+	# Ensure a key=value pair is in the defaults file
+	local key=$1
+	local value=$2
+
+	if [ ! -e $DEFAULTS ]; then
+		echo "# Enter custom parameters for the MightyVariableFan system in this file" > $DEFAULTS
+		chown pi $DEFAULTS  # more convenient
+	fi
+	if grep -q "^${key} *=" $DEFAULTS; then
+		sed -i "s/^${key} *=.*$/${key} = ${value}/" $DEFAULTS
+	else
+		# Ensure the file ends in a newline
+		sed -i -e '$a\' $DEFAULTS
+		# workaround for broken syntax highlighting due to ugly sed syntax'
+		echo -e "\n${key} = ${value}" >> $DEFAULTS
+	fi
+}
+
 
 # Echoing $@ would be problematic if arguments would need to be quoted,
 # luckily this is not the case here.
@@ -88,12 +110,12 @@ pcm_id=$($BEEPDETECT -L 2>/dev/null | grep -o 'Input Device id .*: micsnoop' | a
 [ -n "${pcm_id}" ] || fatal "could not determine microphone device ID."
 
 echo "Setting microphone device ID to ${pcm_id}"
-sed -i "s/^AUDIO_DEVICE=.*$/AUDIO_DEVICE=${pcm_id}/" $START_SCRIPT
+write_defaults 'AUDIO_DEVICE' $pcm_id
 
 
 if [ -n "${SERVER_PORT}" ]; then
 	echo "=== Setting custom server port ${SERVER_PORT}..."
-	sed -i "s/^SERVER_PORT=.*$/SERVER_PORT=${SERVER_PORT}/" $START_SCRIPT
+	write_defaults 'PWM_SERVER_PORT' $SERVER_PORT
 fi
 
 

@@ -50,13 +50,16 @@ from time import sleep, time
 
 import pyaudio
 import requests
+from requests_futures.sessions import FuturesSession
 # pylint: disable=no-name-in-module
 from numpy import short, frombuffer, zeros
 from scipy import fft
-from requests_futures.sessions import FuturesSession
 
 
-#### Defaults, either pass custom values as command-line parameters, or edit these. ####
+#### Defaults ####
+# The preferred way to override these is to define them in the defaults file at DEFAULTS_PATH
+# (see below). Anything defined in that file has priority over the values defined below,
+# but command-line arguments have the highest priority.
 
 PWM_SERVER_IP = "127.0.0.1"
 PWM_SERVER_PORT = 8080
@@ -65,6 +68,11 @@ PWM_SERVER_PORT = 8080
 # to a separate thread, this (plus 1 second) is also the time before the result will be checked
 # and errors will be reported.
 PWM_REQUEST_TIMEOUT = 4
+
+# Device ID as used by PyAudio. If set to None, the default device will be used. If this is
+# the wrong one, invoke this script with -L and use the device ID that corresponds to the
+# 'micsnoop' device.
+AUDIO_DEVICE = None
 
 # Sensitivity threshold for detecting signals. This is tricky! Too low threshold will lead to
 # false detections, down to the point where even a slight echo of a real signal can cause
@@ -75,9 +83,29 @@ PWM_REQUEST_TIMEOUT = 4
 # console output will be a suggested threshold value.
 SENSITIVITY = 20.0
 
+# Indices of the frequency bins that are used for signals. The frequency for bin i is:
+#   i*SAMPLING_RATE/NUM_SAMPLES.
+SIG_BIN1 = 139
+SIG_BIN2 = 151
+SIG_BIN3 = 161
+SIG_BIN4 = 172
+
+# Scale factors for each bin, applied before thresholding on sensitivity. These may vary between
+# microphones and buzzers. When running the calibration procedure exactly as prescribed, you will
+# automatically get suggested values to enter here. The scales are not used during calibration,
+# which is why the calibration procedure should be run at a lower sensitivity setting.
+SIG_SCALE1 = 1.0
+SIG_SCALE2 = 1.8
+SIG_SCALE3 = 2.9
+SIG_SCALE4 = 3.6
+
 #### End of defaults section ####
 
+
 #### Configuration section for fixed values ####
+
+# Path to the defaults configuration file
+DEFAULTS_PATH = "/etc/default/mightyvariablefan"
 
 # Make sure this matches what your sound card can handle. Lower is actually better, because it
 # means higher frequency resolution for the same size of FFT.
@@ -88,16 +116,6 @@ SAMPLING_RATE = 44100
 # is NUM_SAMPLES/SAMPLING_RATE seconds.
 # For 44.1k and 1024 samples, this is 23.2ms or 43.07 windows per second.
 NUM_SAMPLES = 1024
-
-# Indices of the frequency bins that are used for signals. The frequency for bin i is:
-#   i*SAMPLING_RATE/NUM_SAMPLES.
-SIG_BINS = [139, 151, 161, 172]
-
-# Scale factors for each bin, applied before thresholding on sensitivity. These may vary between
-# microphones and buzzers. When running the calibration procedure exactly as prescribed, you will
-# automatically get suggested values to enter here. The scales are not used during calibration,
-# which is why the calibration procedure should be run at a lower sensitivity setting.
-SIG_SCALES = [1.0, 1.8, 2.9, 3.6]
 
 # Indices of the bins that may contain frequencies produced by the buzzer. Anything outside this
 # will be ignored. (Only used if DETECT_CONTINUOUS is enabled)
@@ -117,6 +135,9 @@ DETECT_CONTINUOUS = False
 # this detector for other things.
 SEQUENCE_LENGTH = 3
 
+# The number of possible signal frequencies. This must be a power of 2.
+NUM_SIGNALS = 4
+
 # When a signal appears to be detected, the intensity of half the signal frequency is also checked
 # and if it is at least the signal intensity times this factor, the signal is considered a
 # harmonic and rejected.
@@ -128,12 +149,13 @@ LOCK_FILE = "/run/lock/beepdetect.lock"
 
 #### End of configuration section ####
 
+
 LOG = logging.getLogger('beepdetect')
 LOG.setLevel(logging.INFO)
 LOG_FORMAT = logging.Formatter('%(levelname)s: %(message)s')
 
 
-class DetectionState(object):
+class DetectionState():
     """Manages detected sequence state."""
 
     def __init__(self):
@@ -215,7 +237,7 @@ class DetectionState(object):
             LOG.debug("  sequence value: %d", value)
             self.reset()
             return duty
-        elif len(self.detected) < SEQUENCE_LENGTH and t_since_last > 8:
+        if len(self.detected) < SEQUENCE_LENGTH and t_since_last > 8:
             LOG.debug("Reset because incomplete detection (%d signals)", len(self.detected))
             self.reset()
             return False
@@ -236,7 +258,7 @@ def list_devices():
             LOG.info("  Input Device id %d: %s",
                      i, audio.get_device_info_by_host_api_device_index(0, i).get('name'))
     if not count:
-        LOG.warning("None found. Check whether your sound card is plugged in " +
+        LOG.warning("None found. Check whether your sound card is plugged in "
                     "and not in use by another program.")
 
 def open_input_stream(audio, options):
@@ -264,14 +286,15 @@ def make_duty_request(futures, session, options, duty):
     """Append to the @futures deque an asynchronous request to the PWM server for changing
     the duty cycle."""
     futures.append(
-        session.get('http://{}:{}/setduty?d={}&basic=1'.format(
-                        options.ip, options.port, duty),
+        session.get('http://{}:{}/setduty?d={}&basic=1'.format(options.ip, options.port, duty),
                     timeout=options.timeout))
 
 def start_detecting(options):
     """Run the main detection loop."""
     server_ip = options.ip
     sensitivity = options.sensitivity
+    sig_bins = [options.bin1, options.bin2, options.bin3, options.bin4]
+    sig_scales = [options.scale1, options.scale2, options.scale3, options.scale4]
 
     # To avoid having to do time system calls which may be expensive and return non-monotonic
     # values, all timings rely on the number of audio chunks processed, because the duration of
@@ -317,9 +340,9 @@ def start_detecting(options):
     # Also keep track of the halved signal frequencies. If there is a response at those
     # frequencies that is at least nearly as strong as the signal frequency, then the signal
     # frequency is probably a harmonic from a beep played at a lower frequency.
-    all_bins = SIG_BINS[:] + [i // 2 for i in SIG_BINS]
+    all_bins = sig_bins[:] + [i // 2 for i in sig_bins]
     all_bin_indices = list(range(0, len(all_bins)))
-    sig_bin_indices = list(range(0, len(SIG_BINS)))
+    sig_bin_indices = list(range(0, len(sig_bins)))
     empty_bins = zeros(2 * len(all_bins))
     last_bins = empty_bins[:]  # Ensure to copy by value, not reference
 
@@ -406,7 +429,7 @@ def start_detecting(options):
         # windows, to get a more consistent intensity value even when beep spans two windows.
         current_bins = [intensity[all_bins[i]] for i in all_bin_indices]
         total_bins = list(map(add, last_bins, current_bins))
-        signals = [i for i in sig_bin_indices if total_bins[i] * SIG_SCALES[i] > sensitivity]
+        signals = [i for i in sig_bin_indices if total_bins[i] * sig_scales[i] > sensitivity]
         last_bins = current_bins[:]
 
         if len(signals) != 1:  # either 'silence' or multiple signals
@@ -428,7 +451,7 @@ def start_detecting(options):
                 make_duty_request(futures, session, options, duty)
                 attempts_left = 2
         else:  # 1 signal
-            harmonic_ratio = total_bins[len(SIG_BINS) + signals[0]] / total_bins[signals[0]]
+            harmonic_ratio = total_bins[NUM_SIGNALS + signals[0]] / total_bins[signals[0]]
             if harmonic_ratio > HARMONIC_FACTOR:
                 LOG.debug("Reset because apparent signal %d is actually a harmonic (%.1f)",
                           signals[0], harmonic_ratio)
@@ -441,8 +464,10 @@ def start_detecting(options):
 def calibration(options):
     """Run the calibration procedure."""
     sensitivity = options.sensitivity
+    sig_bins = [options.bin1, options.bin2, options.bin3, options.bin4]
+    sig_scales = [options.scale1, options.scale2, options.scale3, options.scale4]
 
-    sig_bins_groups = [[x-1, x, x+1] for x in SIG_BINS]
+    sig_bins_groups = [[x-1, x, x+1] for x in sig_bins]
     sig_bins_ext = [sig_bin for group in sig_bins_groups for sig_bin in group]  # flatten it
     sig_bin_indices = list(range(0, len(sig_bins_ext)))
     last_sig_bins = zeros(len(sig_bins_ext))
@@ -465,7 +490,7 @@ def calibration(options):
     LOG.info("Using 1/4th of the normal sensitivity value %g.", sensitivity)
     sensitivity /= 4.0
     LOG.info("Intensities for the %s signal frequencies if any exceeds %g:",
-             len(SIG_BINS), sensitivity)
+             NUM_SIGNALS, sensitivity)
 
     in_stream = open_input_stream(audio, options)
     start_time = time()
@@ -509,7 +534,8 @@ def calibration(options):
         LOG.info("-----")
         LOG.info("Exiting calibration mode and generating statistics...")
 
-    LOG.info("Performance check: %d chunks in %d seconds = %.3f/s",
+    LOG.info("[ PERFORMANCE CHECK ]")
+    LOG.info("%d chunks in %d seconds = %.3f/s",
              chunks_recorded,
              elapsed_time,
              chunks_recorded/elapsed_time)
@@ -538,32 +564,40 @@ def calibration(options):
 played, try again after reducing input gain in alsamixer. (It is OK to have clipping on other \
 sounds than the PWM sequences.)")
 
+    LOG.info("[ SCALING FACTORS ]")
     avg_bin_intensities = [sum_sig_bins[i] / max(count_sig_bins[i], 1)
                            for i in range(1, len(sum_sig_bins), 3)]
     LOG.info("Average intensities for the signal bins when above the threshold:")
-    LOG.info(", ".join(["{:.3f}".format(i) for i in avg_bin_intensities]))
-    LOG.info("-> after applying current SIG_SCALES:")
-    LOG.info(", ".join(["{:.3f}".format(i * j)
-                        for i, j in zip(avg_bin_intensities, SIG_SCALES)]))
+    LOG.info("  %s", ", ".join(["{:.3f}".format(i) for i in avg_bin_intensities]))
+    LOG.info("-> after applying current SIG_SCALEs:")
+    LOG.info("  %s,", ", ".join(["{:.3f}".format(i * j)
+                                 for i, j in zip(avg_bin_intensities, sig_scales)]))
+    LOG.info("(Current SIG_SCALEs are: %s)",
+             ", ".join(["{:.1f}".format(i) for i in sig_scales]))
+
     max_avg_intensity = max(avg_bin_intensities)
     try:
         avg_bin_intensities.index(0.0)
-        LOG.warning("Not all bins had detections, can suggest neither SIG_SCALES nor threshold!")
+        LOG.warning("Not all bins had detections, can suggest neither SIG_SCALEs nor threshold!")
     except ValueError:
         # This is not the exception, it's the rule! I guess this is Pythonic...
         suggest_scales = [max_avg_intensity / i for i in avg_bin_intensities]
-        LOG.info("-> suggested values for SIG_SCALES:")
-        LOG.info(", ".join(["{:.1f}".format(i) for i in suggest_scales]))
+        scales_code = ["SIG_SCALE{} = {:.1f}".format(i, j)
+                       for i, j in zip(range(1, 5), suggest_scales)]
+        LOG.info("-> suggested values for SIG_SCALEs:\n%s", "\n".join(scales_code))
         normalized_intensities = [i * j for i, j in zip(avg_bin_intensities, suggest_scales)]
         suggest_sensitivity = min(normalized_intensities) / 3
-        LOG.info("-> suggested sensitivity: %.1f", suggest_sensitivity)
+        LOG.info("-> current sensitivity = %.1f", options.sensitivity)
+        LOG.info("-> suggested sensitivity:\nSENSITIVITY = %.1f", suggest_sensitivity)
 
-    LOG.info("-----")
+    LOG.info("[ DETECTION BINS ]")
     bins_vs_intensities = {sum_sig_bins[i]: sig_bins_ext[i] for i in sig_bin_indices}
     sorted_bins = [value for _, value in sorted(iter(bins_vs_intensities.items()), reverse=True)]
     LOG.info(
         "Bins, including neighboring ones, sorted by average response intensity from high to low:")
     LOG.info(" > ".join(map(str, sorted_bins)))
+    bins_code = []
+    index = 1
     for group in sig_bins_groups:
         try:
             pivot = sorted_bins.index(group[1])
@@ -578,9 +612,13 @@ sounds than the PWM sequences.)")
             except ValueError:
                 pass
         if better:
-            LOG.info("Bin %d appears to be better than bin %d", better, group[1])
+            LOG.info("  Bin %d appears to be better than bin %d", better, group[1])
+            bins_code.append("SIG_BIN{} = {}".format(index, better))
         else:
-            LOG.info("Bin %d looks good", group[1])
+            LOG.info("  Bin %d looks good", group[1])
+        index += 1
+    if bins_code:
+        LOG.info("Suggested custom bin definitions:\n%s", "\n".join(bins_code))
 
 
 def clean_exit():
@@ -618,8 +656,42 @@ def create_lock_file():
     atexit.register(clean_exit)
     signal.signal(signal.SIGTERM, terminated)
 
+def read_defaults():
+    """If there is a defaults file, override allowed values if the file specifies them.
+    Format of the file is Python-style variable definitions, comments starting with #."""
+    # Explicitly test on limited set of keys to disallow overriding arbitrary things
+    overridable_defaults = [
+        'PWM_SERVER_IP', 'PWM_SERVER_PORT', 'PWM_REQUEST_TIMEOUT', 'AUDIO_DEVICE',
+        'SENSITIVITY', 'SIG_BIN1', 'SIG_BIN2', 'SIG_BIN3', 'SIG_BIN4',
+        'SIG_SCALE1', 'SIG_SCALE2', 'SIG_SCALE3', 'SIG_SCALE4'
+    ]
+    if os.path.isfile(DEFAULTS_PATH):
+        line_index = 0
+        with open(DEFAULTS_PATH, 'r') as def_file:
+            while True:
+                line = def_file.readline()
+                line_index += 1
+                if not line:
+                    break
+                line = line.split('#', 1)[0].strip()
+                try:
+                    key, _ = line.split('=', 1)
+                except ValueError:
+                    continue
+                key = key.strip()
+                if not key in overridable_defaults:
+                    continue
+                try:
+                    exec("global {}\n{}".format(key, line))
+                except Exception as err:
+                    print("ERROR: failed to parse line {} in {}: {}".format(
+                        line_index, DEFAULTS_PATH, err), file=sys.stderr)
+                    sys.exit(3)
+
 
 if __name__ == '__main__':
+    read_defaults()
+
     parser = argparse.ArgumentParser(
         description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -641,8 +713,17 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
                         help='Sensitivity threshold for detecting signals',
                         default=SENSITIVITY)
+    parser.add_argument('--bin1', type=int, help='Signal 1 bin index', default=SIG_BIN1)
+    parser.add_argument('--bin2', type=int, help='Signal 2 bin index', default=SIG_BIN2)
+    parser.add_argument('--bin3', type=int, help='Signal 3 bin index', default=SIG_BIN3)
+    parser.add_argument('--bin4', type=int, help='Signal 4 bin index', default=SIG_BIN4)
+    parser.add_argument('--scale1', type=float, help='Signal 1 scale', default=SIG_SCALE1)
+    parser.add_argument('--scale2', type=float, help='Signal 2 scale', default=SIG_SCALE2)
+    parser.add_argument('--scale3', type=float, help='Signal 3 scale', default=SIG_SCALE3)
+    parser.add_argument('--scale4', type=float, help='Signal 4 scale', default=SIG_SCALE4)
     parser.add_argument('-D', '--device', type=int,
-                        help='Use this device ID instead of the default input device')
+                        help='Use this device ID instead of the default input device',
+                        default=AUDIO_DEVICE)
     parser.add_argument('-L', '--list_devices', action='store_true',
                         help='List available devices with inputs')
 

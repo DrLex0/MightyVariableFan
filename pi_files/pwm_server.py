@@ -14,15 +14,19 @@ import os
 import random
 import string
 import subprocess
+import sys
 import time
 
 import cherrypy
-import RPi.GPIO as GPIO
+import RPi.GPIO as rpi_gpio
 
 
-#### Defaults, either pass custom values as command-line parameters, or edit these. ####
+#### Defaults ####
+# The preferred way to override these is to define them in the defaults file at DEFAULTS_PATH
+# (see below). Anything defined in that file has priority over the values defined below,
+# but command-line arguments have the highest priority.
 
-SERVER_PORT = 8080
+PWM_SERVER_PORT = 8080
 STATIC_CONTENT_DIR = "/home/pi/pwm_server"
 
 # The GPIO pin to use.
@@ -43,18 +47,22 @@ PWM_MIN_DC = 1.0
 # PWM kickstart parameters. Kickstart always works at 100% duty cycle, only the duration of the
 #   'kick' varies.
 # The time to kick when we start from zero, it must be enough to bring the fan above stall speed.
-KICK_LAUNCH = 0.25
+PWM_KICK_LAUNCH = 0.25
 # The duration of a kick is calculated as the difference in duty cycles (percentages) multiplied
 # by this factor. This should be tuned such that the fan just doesn't overshoot (or only slightly
 # overshoots) the target speed.
-KICK_FACTOR = 0.01
+PWM_KICK_FACTOR = 0.01
 
 # In case you're running this on something else than a Pi
 MACHINE_NAME = "Raspberry Pi"
 
 #### End of defaults section ####
 
+
 #### Configuration section for fixed values ####
+
+# Path to the defaults configuration file
+DEFAULTS_PATH = "/etc/default/mightyvariablefan"
 
 # Path to the lock file of beepdetect.py, will be used to show a warning if it isn't running.
 DETECTOR_LOCK_FILE = "/run/lock/beepdetect.lock"
@@ -73,9 +81,9 @@ class PWMController:
         self.kick_launch = config.kick_launch
         self.kick_factor = config.kick_factor
         self.kickstart = bool(config.kick_launch or config.kick_factor)
-        GPIO.setmode(GPIO.BOARD)
-        GPIO.setup(config.pin, GPIO.OUT)
-        self.pwm_out = GPIO.PWM(config.pin, config.frequency)
+        rpi_gpio.setmode(rpi_gpio.BOARD)
+        rpi_gpio.setup(config.pin, rpi_gpio.OUT)
+        self.pwm_out = rpi_gpio.PWM(config.pin, config.frequency)
         self.duty = 0.0
         self.pwm_out.start(self.duty)  # clear any leftover state
         self.pwm_out.stop()
@@ -115,7 +123,7 @@ class PWMController:
     @staticmethod
     def shutdown():
         """To be invoked when about to stop the server."""
-        GPIO.cleanup()
+        rpi_gpio.cleanup()
 
 
 class GpioServer:
@@ -362,13 +370,46 @@ the request lacks the 'manual' parameter.<br><a href='/'>Back</a>")
 """.format(title, body)
 
 
+def read_defaults():
+    """If there is a defaults file, override allowed values if the file specifies them.
+    Format of the file is Python-style variable definitions, comments starting with #."""
+    # Explicitly test on limited set of keys to disallow overriding arbitrary things
+    overridable_defaults = [
+        'PWM_SERVER_PORT', 'STATIC_CONTENT_DIR', 'PWM_PIN', 'PWM_FREQ',
+        'PWM_MIN_DC', 'PWM_KICK_LAUNCH', 'PWM_KICK_FACTOR', 'MACHINE_NAME'
+    ]
+    if os.path.isfile(DEFAULTS_PATH):
+        line_index = 0
+        with open(DEFAULTS_PATH, 'r') as def_file:
+            while True:
+                line = def_file.readline()
+                line_index += 1
+                if not line:
+                    break
+                line = line.split('#', 1)[0].strip()
+                try:
+                    key, _ = line.split('=', 1)
+                except ValueError:
+                    continue
+                key = key.strip()
+                if not key in overridable_defaults:
+                    continue
+                try:
+                    exec("global {}\n{}".format(key, line))
+                except Exception as err:
+                    print("ERROR: failed to parse line {} in {}: {}".format(
+                        line_index, DEFAULTS_PATH, err), file=sys.stderr)
+                    sys.exit(3)
+
 if __name__ == '__main__':
+    read_defaults()
+
     parser = argparse.ArgumentParser(
         description='Simple server to control PWM on a GPIO output of a Raspberry Pi.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-p', '--port', type=int,
                         help='Port on which to serve',
-                        default=SERVER_PORT)
+                        default=PWM_SERVER_PORT)
     parser.add_argument('-s', '--static_dir',
                         help='Directory with static content like CSS files',
                         default=STATIC_CONTENT_DIR)
@@ -383,10 +424,10 @@ if __name__ == '__main__':
                         default=PWM_MIN_DC)
     parser.add_argument('-l', '--kick_launch', type=float, metavar='T',
                         help='The time (seconds) to kick when starting from zero',
-                        default=KICK_LAUNCH)
+                        default=PWM_KICK_LAUNCH)
     parser.add_argument('-k', '--kick_factor', type=float, metavar='KF',
                         help='Duration of a kick versus difference in duty cycles',
-                        default=KICK_FACTOR)
+                        default=PWM_KICK_FACTOR)
     parser.add_argument('-n', '--name',
                         help='Custom machine name to display',
                         default=MACHINE_NAME)
