@@ -10,7 +10,7 @@ DETECT_LOG=/var/log/beepdetect.log
 [ -f "$SERVER_LOG" ] && mv -f "$SERVER_LOG" /tmp/old_pwm_server.log
 [ -f "$DETECT_LOG" ] && mv -f "$DETECT_LOG" /tmp/old_beepdetect.log
 
-su pi -c "nohup /usr/local/bin/pwm_server.py" 2>&1 > $SERVER_LOG &
+su pi -c "nohup /usr/local/bin/pwm_server.py 2>&1" > $SERVER_LOG &
 # Could consider using chrt for even higher (real-time) priorities. Even on a
 # non-RT kernel, such priorities get precedence over what can be set with nice.
 nohup nice -n -20 /usr/local/bin/beepdetect.py 2>&1 > $DETECT_LOG &
