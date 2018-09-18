@@ -17,14 +17,14 @@ This Python script, running on e.g. a Raspberry Pi, continuously analyses an FFT
   and sends a command to a PWM controller daemon whenever it detects a sequence of the signal
   frequencies with the right timing. (The script can be easily adapted to listen to sequences of
   4 beeps, which allows to send a whole whopping byte of information per sequence!)
-This works fine with a microphone, if it is placed very close to the buzzer, using a mount made
+This works fine with a microphone if it is placed very close to the buzzer, using a mount made
   from a flexible material to minimize noises from the stepper motors being transferred to the
   mic. A more robust alternative (that allows to remove the buzzer as well if it drives you
   crazy), is to solder a direct electrical connection between the buzzer contacts and your audio
   input (through a decoupling capacitor). This makes the system impervious against noises like
   pigs squealing exactly at the high signal frequencies, which obviously happens all the time
   while 3D printing.
-This script only consumes between 5 and 6% of CPU on a Raspberry Pi 3, so it can run many other
+This script only consumes between 5 and 7% of CPU on a Raspberry Pi 3, so it can run many other
   things at the same time. However, this should be run at a low 'nice' value to ensure it gets
   priority over other processes.
 
@@ -50,6 +50,7 @@ from time import sleep, time
 
 import pyaudio
 import requests
+from requests.auth import HTTPDigestAuth
 from requests_futures.sessions import FuturesSession
 # pylint: disable=no-name-in-module
 from numpy import short, frombuffer, zeros
@@ -63,6 +64,10 @@ from scipy import fft
 
 PWM_SERVER_IP = "127.0.0.1"
 PWM_SERVER_PORT = 8080
+
+# Optional authentication for the server. Empty username or password disables authentication.
+PWM_USER = ''
+PWM_PASS = ''
 
 # Maximum seconds for performing a request to the PWM server. Because these requests are offloaded
 # to a separate thread, this (plus 1 second) is also the time before the result will be checked
@@ -159,6 +164,12 @@ class DetectionState():
     """Manages detected sequence state."""
 
     def __init__(self):
+        # Make pylint happy (and also more obvious what are attributes)
+        self.seq_scale_factor = None
+        self.time_index = None
+        self.detected = None
+        self.current_sig_start = None
+        self.last_sig_end = None
         self.reset()
 
     def reset(self):
@@ -286,7 +297,7 @@ def make_duty_request(futures, session, options, duty):
     """Append to the @futures deque an asynchronous request to the PWM server for changing
     the duty cycle."""
     futures.append(
-        session.get('http://{}:{}/setduty?d={}&basic=1'.format(options.ip, options.port, duty),
+        session.get('http://{}:{}/api/setduty?d={}&basic=1'.format(options.ip, options.port, duty),
                     timeout=options.timeout))
 
 def start_detecting(options):
@@ -306,6 +317,9 @@ def start_detecting(options):
     # overflow due to a slow response. Only when we're sure the request will be either done or
     # has timed out, check on it to print an error message if it failed.
     session = FuturesSession(max_workers=4)
+    if options.user and options.password:
+        session.auth = HTTPDigestAuth(options.user, options.password)
+
     # Deques are very efficient for a FIFO like this.
     futures = deque()
     future_countdowns = deque()
@@ -318,22 +332,24 @@ def start_detecting(options):
     # 1, warn early if the server isn't running;
     # 2, ensure the server is in enabled state;
     # 3, ensure these bits of code are already cached when we need to do our first real request.
-    attempts_left = 3
+    attempts_left = 4
     while server_ip and attempts_left:
-        future = session.get('http://{}:{}/enable?basic=1'.format(server_ip, options.port))
+        future = session.get('http://{}:{}/api/enable?basic=1'.format(server_ip, options.port))
         try:
             req = future.result()
             if req.status_code == 200:
                 LOG.info("OK: Successfully enabled PWM server.")
                 break
             else:
-                LOG.error("Test request to PWM server failed with status %s", req.status_code)
+                LOG.warning("Test request to PWM server failed with status %s", req.status_code)
         except requests.ConnectionError as err:
-            LOG.error("The PWM server may be down? %s", err)
+            LOG.warning("The PWM server may be down? %s", err)
         attempts_left -= 1
-        LOG.error("Attempts left: %d", attempts_left)
+        LOG.warning("Attempts left: %d", attempts_left)
         if attempts_left:
             sleep(2)
+        else:
+            LOG.error("PWM server could not be contacted! Continuing anyway.")
 
     LOG.info("Beep sequence detector started.")
 
@@ -640,17 +656,15 @@ def create_lock_file():
         # Prevent two instances from trying to run at the same time, also useful to allow
         # pwm_server.py to show a warning if this daemon is not active.
         if os.path.isfile(LOCK_FILE):
-            LOG.fatal(
-                "Another instance is already running, or has exited without cleaning up its lock file at %s",
-                LOCK_FILE)
+            LOG.fatal(("Another instance is already running, or has exited without "
+                       "cleaning up its lock file at %s"), LOCK_FILE)
             sys.exit(1)
         with open(LOCK_FILE, "w") as file_handle:
             file_handle.write(str(os.getpid()))
     else:
         # Do not make this a fatal error to facilitate testing on other platforms.
-        LOG.warning(
-            "Not creating a lockfile at %s because the directory is not writable or does not exist.",
-            LOCK_FILE)
+        LOG.warning(("Not creating a lockfile at %s because the directory is not "
+                     "writable or does not exist."), LOCK_FILE)
     import atexit
     import signal
     atexit.register(clean_exit)
@@ -661,8 +675,8 @@ def read_defaults():
     Format of the file is Python-style variable definitions, comments starting with #."""
     # Explicitly test on limited set of keys to disallow overriding arbitrary things
     overridable_defaults = [
-        'PWM_SERVER_IP', 'PWM_SERVER_PORT', 'PWM_REQUEST_TIMEOUT', 'AUDIO_DEVICE',
-        'SENSITIVITY', 'SIG_BIN1', 'SIG_BIN2', 'SIG_BIN3', 'SIG_BIN4',
+        'PWM_SERVER_IP', 'PWM_SERVER_PORT', 'PWM_REQUEST_TIMEOUT', 'PWM_USER', 'PWM_PASS',
+        'AUDIO_DEVICE', 'SENSITIVITY', 'SIG_BIN1', 'SIG_BIN2', 'SIG_BIN3', 'SIG_BIN4',
         'SIG_SCALE1', 'SIG_SCALE2', 'SIG_SCALE3', 'SIG_SCALE4'
     ]
     if os.path.isfile(DEFAULTS_PATH):
@@ -693,7 +707,8 @@ if __name__ == '__main__':
     read_defaults()
 
     parser = argparse.ArgumentParser(
-        description='Beep sequence detector script for variable fan speed on a MightyBoard-based 3D printer.',
+        description=('Beep sequence detector script for variable fan speed on a '
+                     'MightyBoard-based 3D printer.'),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         argument_default=argparse.SUPPRESS)
     # SUPPRESS hides useless defaults in help text, the downside is needing to use hasattr().
@@ -702,7 +717,8 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', action='store_true',
                         help='Enable debug output')
     parser.add_argument('-i', '--ip',
-                        help='IP of the PWM server. Set to empty string to disable server requests.',
+                        help=('IP of the PWM server. '
+                              'Set to empty string to disable server requests.'),
                         default=PWM_SERVER_IP)
     parser.add_argument('-p', '--port', type=int,
                         help='Port of the PWM server',
@@ -710,6 +726,12 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--timeout', type=int,
                         help='Timeout in seconds for requests to the PWM server',
                         default=PWM_REQUEST_TIMEOUT)
+    parser.add_argument('-u', '--user',
+                        help='User name for server login (leave empty for no login)',
+                        default=PWM_USER)
+    parser.add_argument('-a', '--password',
+                        help='Password for server login (leave empty for no login)',
+                        default=PWM_PASS)
     parser.add_argument('-s', '--sensitivity', type=float, metavar='S',
                         help='Sensitivity threshold for detecting signals',
                         default=SENSITIVITY)

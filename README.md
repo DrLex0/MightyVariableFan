@@ -216,6 +216,13 @@ During a print you can observe the current PWM duty cycle and manipulate it if y
 
 The interface also allows to *shut down the Pi cleanly.* This is not terribly important but recommended if the Pi's power supply is behind the same switch as the printer's. It is better to perform a clean shutdown than simply pulling the power. Wait at least 15 seconds for the Pi to shut down before disconnecting the mains.
 
+If you want to make the interface accessible from an outside network where it is undesirable that anyone can manipulate the fan controller, you can set up simple **authentication** with a username and password. The basic status page can always be viewed without logging in but login credentials will be asked when trying to access the interface page. To do this, edit the file */etc/default/mightyvariablefan* and add these lines (obviously use a nontrivial username and password):
+```
+PWM_USER = "someName"
+PWM_PASS = "somePassword"
+```
+Reboot the Pi to apply these changes. There is a ‘logout’ link but this only works in certain browsers (like Chrome) due to limitations of the digest-based authentication method. In other browsers the only way to log out is to quit and reopen the browser. Mind that the server uses plain HTTP which means login credentials could theoretically be sniffed from network traffic. If you want to prevent this, I would advise to not rely on plain port forwarding to make this application available over the internet but instead place it behind a HTTPS reverse proxy like [Nginx](https://www.nginx.com/) (you can also use this to add extra protection like rate limiting).
+
 ### Tools and tweaks
 In the Tools folder there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that play the sequences for disabling the fan and setting it to 100%. These are useful for several things:
 * if you abort a print, the fan will remain at its last speed. You can use the ‘off’ file to stop the fan if you don't have direct access to the PWM web interface.
