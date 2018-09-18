@@ -216,7 +216,7 @@ During a print you can observe the current PWM duty cycle and manipulate it if y
 
 The interface also allows to *shut down the Pi cleanly.* This is not terribly important but recommended if the Pi's power supply is behind the same switch as the printer's. It is better to perform a clean shutdown than simply pulling the power. Wait at least 15 seconds for the Pi to shut down before disconnecting the mains.
 
-If you want to make the interface accessible from an outside network where it is undesirable that anyone can manipulate the fan controller, you can set up simple **authentication** with a username and password. The basic status page can always be viewed without logging in but login credentials will be asked when trying to access the interface page. To do this, edit the file */etc/default/mightyvariablefan* and add these lines (obviously use a nontrivial username and password):
+If you want to make the interface accessible from an outside network where it is undesirable that anyone can manipulate the fan controller, you can set up simple **authentication** with a username and password. The basic status page can always be viewed without logging in but if both a username and password have been configured, login credentials will be asked when trying to access the interface page. To do this, edit the file */etc/default/mightyvariablefan* and add these lines (obviously use a nontrivial username and password):
 ```
 PWM_USER = "someName"
 PWM_PASS = "somePassword"
