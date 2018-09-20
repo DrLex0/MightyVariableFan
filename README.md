@@ -102,7 +102,7 @@ chmod 755 install.sh
 sudo ./install.sh
 ```
 
-By default the PWM server will run on TCP port 8081. If you want to change this because something else is already running on that port, pass the desired port number as argument to the install command, e.g.: `sudo ./install.sh 8082`
+By default the PWM server will run on TCP port 8081. If you want to change this because something else is already running on that port, pass the desired port number as argument to the install command (e.g.: `sudo ./install.sh 8082`). The port number must be higher than 1023 because the server does not run with root privileges.
 
 If this script stops with an ‘ERROR’ message and you cannot figure out how to fix it, you can contact me directly or file an issue on GitHub. If it says *“Everything ready, now starting services,”* then you're good to go.
 
