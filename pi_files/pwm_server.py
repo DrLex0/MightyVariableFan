@@ -27,7 +27,7 @@ import RPi.GPIO as rpi_gpio
 # (see below). Anything defined in that file has priority over the values defined below,
 # but command-line arguments have the highest priority.
 
-PWM_SERVER_PORT = 8080
+PWM_SERVER_PORT = 8081
 STATIC_CONTENT_DIR = "/home/pi/pwm_server"
 
 # Optional authentication for the server. Empty username or password disables authentication.

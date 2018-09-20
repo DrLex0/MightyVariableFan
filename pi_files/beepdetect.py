@@ -63,7 +63,7 @@ from scipy import fft
 # but command-line arguments have the highest priority.
 
 PWM_SERVER_IP = "127.0.0.1"
-PWM_SERVER_PORT = 8080
+PWM_SERVER_PORT = 8081
 
 # Optional authentication for the server. Empty username or password disables authentication.
 PWM_USER = ''
