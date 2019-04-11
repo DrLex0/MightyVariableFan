@@ -1,7 +1,8 @@
 # MightyVariableFan
 
 *Variable fan speed workaround for 3D printers based on the MightyBoard, like the FlashForge Creator Pro*<br>
-by Alexander Thomas, aka Dr. Lex
+by Alexander Thomas, aka Dr. Lex<br>
+Version 1.0
 
 
 ## What is it?
@@ -12,7 +13,8 @@ To make this work, you need some minimal understanding of how to use Linux on a 
 
 This has so far only been tested with *Slic3r,* and quite likely the post-processing script that generates the beep sequences will only work with Slic3r-generated G-code at this moment. Of course the main reason why I have published this on *GitHub* is to make it easy for anyone to modify the code and submit pull requests to make it work with other slicer programs.
 
-Mind that this is still in an **experimental stage.** However, the current version is pretty usable already. See the *Current Issues* section at the bottom for caveats. This has only been tested with prints from the SD card, because I don't print through USB. I don't expect problems with USB prints though.
+I have been using this for a year without problems, hence I have created a 1.0 release. There are some minor problems left and some things I would like to improve upon, but I consider the 1.0 release very usable. See the *Current Issues* section at the bottom for caveats.<br>
+This has only been tested with prints from the SD card, because I don't print through USB. I don't expect problems with USB prints though.
 
 
 ### Motivation
@@ -62,6 +64,8 @@ If you would suffer from one or both of these problems, they can be reduced or e
 If you're not afraid of soldering on your printer's main board, you can omit the microphone and make a direct electrical connection between the buzzer contacts (marked ‘BUZZ BUZZ’) and the USB sound card. You should make the connection through a decoupling capacitor and possibly add a resistor divider to attenuate the signal if necessary. This eliminates the outside noise problem completely. Moreover, you can unsolder the buzzer as well if you want to mute it entirely. This ReadMe won't explain how to do all these things: I assume that if you are prepared to solder on your printer's main board, you also have sufficient knowledge how to make this kind of connection correctly.
 
 
+## PAQ (Possibly Asked Questions)
+
 ### Is this really reliable? It can't be!
 
 Yes it is. I have been using it for many months now and despite the few glitches mentioned in the ‘current issues’, it works incredibly well.
@@ -69,7 +73,7 @@ Yes it is. I have been using it for many months now and despite the few glitches
 
 ### Can I run something else on the same Raspberry Pi?
 
-It depends. If the other process consumes a lot of CPU or I/O load, then it risks interfering with the real-time operation of the beep detection. So far someone has reported trying to run this system on the same Pi as Octoprint, and this *failed* because the beep detector couldn't reach the required performance. There was no obvious cause (the octoprint process did not cause an excessive load), but it was a pre-made custom Octoprint Raspbian image which might have contained modifications that interfere with the USB sound card. In other words your mileage may vary. Safest is to use a dedicated Raspberry Pi for the fan system, they are cheap anyway…
+It depends. If the other process consumes a lot of CPU or I/O load, then it risks interfering with the real-time operation of the beep detection. So far someone has reported trying to run this system on the same Pi as Octoprint, and this *failed* because the beep detector couldn't reach the required performance. There was no obvious cause (the octoprint process did not cause an excessive load), but it was a pre-made custom Octoprint Raspbian image which might have contained modifications that interfere with the USB sound card. In other words, your mileage may vary. Safest is to use a dedicated Raspberry Pi for the fan system, they are cheap anyway…
 
 
 ## Installing
@@ -190,11 +194,11 @@ Once you're done, either reboot the Pi or run `sudo startpwmservices` to resume 
 
 ### Optional step: install custom firmware
 
-This step is not strictly necessary. If you never change bed or extruder temperatures during a print and your extruder PID controllers are well-tuned and the printer never reenters heating mode while printing, then the standard firmware from FlashForge (or whomever your printer's manufacturer is) will do fine.
+This step is not strictly necessary depending on what Sailfish firmware version you're currently running. Recent releases of the firmware have an annoying feature that interferes with the MightyVariableFan system: they always play a song each time all heaters have reached their target temperature, even during prints. If this tune starts right in the middle of one of the beep sequences, that particular fan speed change will not be executed, which could be disastrous in worst-case situations.
 
-The reason why you might want to install a new Sailfish build is because recent versions play a tune each time all heaters have reached their target temperature. If this tune starts right in the middle of one of the beep sequences, that particular fan speed change will not be executed which could be disastrous in worst-case situations. An elegant solution is to extend Sailfish with an extra toggle to mute this tune during printing. I have already created a [pull request](https://github.com/jetty840/Sailfish-MightyBoardFirmware/pull/201) exactly for this. It may take a while before it is accepted and even then there is no guarantee that FlashForge (or your particular manufacturer) will pick this up anytime soon. For this reason I have created my own Sailfish build with these changes included.
+If you are running an older version that does not play these tunes during prints and you do not plan to update it, then you don't need to do anything. Otherwise if your version does play the tunes, or you want to have all the latest improvements to Sailfish, then you only really have one option: [install the custom firmware build from my Sailfish branch](https://github.com/DrLex0/Sailfish-MightyBoardFirmware/releases/tag/20180505) (available for all other MightyBoard-based printers supported by Sailfish as well). This build allows to prevent the heaters tune from being played during printing, by means of an extra toggle in the LCD menu at `Utilities` → `General Settings` → `Heaters Sound`. Set this to `OFF` after installing this firmware.
 
-You can [download this custom firmware build from my Sailfish branch](https://github.com/DrLex0/Sailfish-MightyBoardFirmware/releases/tag/20180505) (available for all other MightyBoard-based printers supported by Sailfish as well). It also includes other recent improvements that probably are not yet incorporated in official builds available from printer manufacturers, for that reason alone it could be worth upgrading to it.
+I have created a [pull request](https://github.com/jetty840/Sailfish-MightyBoardFirmware/pull/201) on the main Sailfish repository that adds this same heater tune toggle, but it is unlikely this will ever make it into official builds, especially because development on this main branch seems to have stagnated. Even if it does, there is no guarantee that FlashForge (or your particular manufacturer) will distribute such a build anytime soon. For this reason you should flash my custom build. It also includes other recent improvements that probably are not yet incorporated in official builds available from printer manufacturers, for that reason alone it could be worth upgrading to it.
 
 
 ## Using
