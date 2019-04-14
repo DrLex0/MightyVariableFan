@@ -12,6 +12,9 @@ This script assumes the fan commands are M106 (with an S argument) and M107. Thi
   the case if you configure your slicer to output G-code for RepRap or another firmware that
   supports variable fan speed (I recommend to stick to RepRap because there are only minor
   differences in G-code output between it and Sailfish).
+Some slicers like S3D do output M126 commands with a speed argument. In that case you can invoke
+  the script with the -S argument to treat M126/127 commands as if they are M106/107, and you do
+  not need to change your printer profile.
 As with all my other post-processing scripts, extrusion coordinates must be relative (M83).
 
 Alexander Thomas a.k.a. DrLex, https://www.dr-lex.be/
@@ -75,7 +78,7 @@ SEQUENCE_LENGTH = 3
 #### End of configuration section ####
 
 
-VERSION = '0.3'
+VERSION = '0.4'
 
 # Number of lines in the buffers. More allows to cope with more detailed and faster prints, but
 # is slower and requires more memory to process. If you need more than 128, you're probably
@@ -88,6 +91,12 @@ DEBUG = False
 # as the fact that we're not considering acceleration when estimating times.
 SEQUENCE_DURATION = 1.2 * (0.4 + SEQUENCE_LENGTH * 0.02 + (SEQUENCE_LENGTH - 1) * 0.1)
 
+# The actual commands we'll consider as M106/M107. This allows overriding these for particular
+# slicers.
+CMD_106 = 'M106'
+# Sidenote: M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
+CMD_107 = 'M107'
+
 LOG = logging.getLogger('pwm_postproc')
 LOG.setLevel(logging.INFO)
 
@@ -96,7 +105,7 @@ class EndOfPrint(Exception):
     pass
 
 
-class GCodeStreamer(object):
+class GCodeStreamer():
     """Class for reading a GCode file without having to shove it entirely in memory, by only
     keeping a buffer of the last read lines. When a new line is read and the buffer exceeds a
     certain size, the oldest line(s) will be popped from the buffer and sent to output."""
@@ -108,6 +117,10 @@ class GCodeStreamer(object):
         self.feed_factor = config.feed_factor
         self.feed_limit_z = config.feed_limit_z
         self.print_times = hasattr(config, 'timings')
+
+        # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
+        self.re_fan_cmd = re.compile(r"({M106}|{M107})(\s+S(\d*\.?\d+)|\s|;|$)".format(
+            M106=CMD_106, M107=CMD_107))
 
         self.output = out_stream
         self.max_buffer = max_buffer
@@ -147,7 +160,10 @@ class GCodeStreamer(object):
                 replaced += 1
             else:
                 print(line.rstrip("\r\n"), file=self.output)
-            if re.search(r";\s*@body(\s+|$)", line):
+            # Ignore @body if preceded by more than 1 comment character, because this will
+            # be the case for e.g. S3D which includes a copy of the start G-code before
+            # the actual code begins.
+            if re.match(r"[^;]*;\s*@body(\s+|$)", line):
                 break
         return replaced
 
@@ -244,7 +260,7 @@ class GCodeStreamer(object):
 
         if re.match(r"[^;]*G1(\s|;|$)", line):  # print or travel move
             time_estimate = self._update_print_state(line)
-        elif re.match(r"(M126|M127)(\s|;|$)", line):
+        elif CMD_106 != 'M126' and re.match(r"(M126|M127)(\s|;|$)", line):
             self.m126_7_found = True
         elif re.match(r"(M109|M116|M190|M6|T\d+)(\s|;|$)", line):
             # Treat 'wait for' as well as tool change commands as taking very long, such that
@@ -253,14 +269,17 @@ class GCodeStreamer(object):
         elif line.startswith(END_MARKER):
             self.end_of_print = True
         else:
-            # M107 is actually deprecated according to the RepRap wiki, but Slic3r still uses it.
-            # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
-            fan_command = re.match(r"(M106|M107)(\s+S(\d*\.?\d+)|\s|;|$)", line)
+            fan_command = self.re_fan_cmd.match(line)
             if fan_command:
-                # An M106 without S argument will be treated as M106 S0 or M107.
                 duty_cycle = 0.0
-                if fan_command.group(1) == "M106" and fan_command.group(3):
-                    duty_cycle = float(fan_command.group(3))
+                if fan_command.group(1) == CMD_106:
+                    if fan_command.group(3):
+                        duty_cycle = float(fan_command.group(3))
+                    else:
+                        # An M106 without S argument will be treated as M106 S255, this
+                        # offers backwards compatibility when using the -S option with
+                        # a file containing plain M126/127 commands.
+                        duty_cycle = 255.0
                 self.xyzfd[4] = duty_cycle
             else:
                 # S argument is not supported (at least not by GPX)
@@ -704,6 +723,9 @@ parser.add_argument('-f', '--feed_factor', type=float,
 parser.add_argument('-l', '--feed_limit_z', type=float,
                     help='Maximum feedrate for the Z axis',
                     default=FEED_LIMIT_Z)
+parser.add_argument('-S', '--speed_m126', action='store_true',
+                    help='Treat M126/127 commands as M106/107 (if they have no S value, it ' +
+                    'will be assumed 100%% speed)')
 
 args = parser.parse_args()
 
@@ -735,6 +757,11 @@ LOG.addHandler(LOG_HANDLER)
 LOG.debug("Debug output enabled, prepare to be spammed")
 LOG.trace("Trace output enabled, prepare to be thoroughly spammed")
 
+if hasattr(args, 'speed_m126'):
+    CMD_106 = 'M126'
+    CMD_107 = 'M127'
+    LOG.debug("Considering commands %s, %s for fan speed", CMD_106, CMD_107)
+
 output = args.out_file if hasattr(args, 'out_file') else sys.stdout
 gcode = GCodeStreamer(args, output)
 off_sequence = GCodeStreamer.speed_to_sequence(0.0)
@@ -747,7 +774,7 @@ try:
     else:
         # Assumption: anything before the end of the start G-code will only contain 'fan off'
         # instructions, either using M107, or M106 S0.
-        if gcode.start(("M106", "M107"), off_commands):
+        if gcode.start((CMD_106, CMD_107), off_commands):
             last_sequence = off_sequence
 except EOFError as err:
     LOG.error(err)
@@ -814,7 +841,7 @@ while True:
     elif current_layer_z == current_data[1]:
         # Must be a fan speed command
         if DEBUG:
-            assert current_data[0].startswith(("M106", "M107"))
+            assert current_data[0].startswith((CMD_106, CMD_107))
         LOG.debug("  -> Fan command")
         gcode.pop()  # Get rid of this invalid Sailfish command
         # get_next_event relies on the last line to detect fan speed changes, but we've just
@@ -938,8 +965,7 @@ while True:
 gcode.stop()
 
 if gcode.m126_7_found:
-    # I might offer a fallback mode that treats those commands as M106 with a default speed.
-    # This should be explicitly enabled via a CLI argument, otherwise this warning must appear.
     LOG.warning("M126 and/or M127 command(s) were found inside the body of the G-code. \
-Most likely, your fan will not work for this print. Are you sure your slicer is outputting \
-G-code with M106 commands (e.g. RepRap G-code flavor)?")
+Most likely, your fan will not work for this print. Either ensure your slicer is outputting \
+G-code with M106 commands (e.g. RepRap G-code flavor), or enable the -S option if you are \
+sure that your slicer outputs M126 commands with S arguments (e.g. S3D does this).")
