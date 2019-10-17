@@ -203,6 +203,7 @@ class GpioDisplay:  # pylint: disable=too-few-public-methods
             detector_warning = "<br><span class='warn'>Warning: beepdetect is not running!</span>"
         links = "<p><a href='/'>Refresh</a></p>\n<p><a href='/api/'>Go to interface page</a></p>"
 
+        cherrypy.response.headers["Cache-Control"] = "max-age=0, max-stale=0"
         return html(
             "PWM Server",
             "PWM status: {}<br>{}<br>{}{}{}".format(
@@ -246,6 +247,8 @@ class GpioAPI:
         This should be be a simple page that can be used to control all basic functions of the
         server from a smallish touch display.
         TODO: create a much nicer UI that always stretches itself across small screens."""
+        cherrypy.response.headers["Cache-Control"] = "max-age=0, max-stale=0"
+
         active = "active" if self.pwm.active else "<span class='warn'>inactive</span>"
         scale = self.pwm.scale
         if basic:
