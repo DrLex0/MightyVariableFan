@@ -4,6 +4,9 @@
 by Alexander Thomas, aka Dr. Lex<br>
 Version 1.1a
 
+![Screenshots](images/screenshots-smartwatch.png)<br>
+[Screenshots of web UI on a smartwatch (view larger image)](images/screenshots-smartwatch.png)
+
 
 ## What is it?
 
@@ -264,6 +267,8 @@ The IRF520 MOSFET is theoretically capable of drawing up to 9 A of current. How
 There still is a very tiny risk that a detection may be missed (judging from my tests, the risk is perhaps 1 in 1000). I plan to redesign the detection logic to be more robust. I believe though that the printer may very rarely botch up playback of an M300 command as well. To avoid that a missed detection at an unfortunate moment could ruin a print, I plan to modify the post-processing script to repeat sequences at important locations.
 
 If you would be running your own custom build based on the very latest Sailfish master branch, you will run into a problem caused by the ‘hammerfix’ commits by *dbavatar* from around July 2016: M300 commands (to play beeps) cause a significant pause in the print, and the sequences are played with sloppier timings that will cause beepdetect.py to miss them. I have made a [pull request](https://github.com/jetty840/Sailfish-MightyBoardFirmware/pull/202) that nearly eliminates the pauses by improving SD card reading efficiency. The sloppy beep playback is still a problem but I plan to rewrite the detection algorithm in beepdetect.py anyway such that it is more robust. For those who do want to try the hammer fix, ask and I'll make a build that includes it. You should first try [my other custom build](https://github.com/DrLex0/Sailfish-MightyBoardFirmware/releases/tag/20180505) however, perhaps the included SD card reading improvement will already provide the performance boost you're looking for.
+
+Next to the tiny risk of a missed detection, there is also a considerably higher risk of tunes played by the printer to cause a false detection. This means such tune can turn on the fan or change its speed to something unpredictable. When using my custom firmware build that disables the heater tunes during printing, this is not much of a problem: each print should start with a ‘fan off’ command anyway, and there is no harm if the fan is inadvertently left spinning by the tune that signals the end of the print (if you have one in your end G-code). With other builds it can be very problematic however, which is why I highly recommend to use [my custom firmware build](https://github.com/DrLex0/Sailfish-MightyBoardFirmware/releases/tag/20180505). Anyway, this problem would also be solved by a more robust detection strategy.
 
 
 ### Disclaimer
