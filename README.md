@@ -248,7 +248,7 @@ In the Tools folder there are files `PWMFanOff.x3g` and `PWMFanMax.x3g` that pla
 
 Last but not least, if you previously neglected fan speed values in your slicer profiles (as you should have), now is the time to go through them again and try to enter sensible values. Optimal values will differ between each filament and also depend on what kind of extruder, nozzle, and cooling duct you are using. Be prepared to experiment and tweak! Also be prepared to be amazed at how much of a quality improvement proper cooling can provide.
 
-This system is compatible with version 0.7 or newer of my [dualstrusion post-processing script](https://www.dr-lex.be/info-stuff/print3d-dualstrusion.html) to improve dual extrusion prints on the FFCP.
+This system is compatible with version 0.7 or newer of my [dualstrusion post-processing script](https://www.dr-lex.be/software/print3d-dualstrusion.html) to improve dual extrusion prints on the FFCP.
 
 
 ## Technical details
