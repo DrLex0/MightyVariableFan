@@ -110,6 +110,8 @@ class GCodeStreamer():
     keeping a buffer of the last read lines. When a new line is read and the buffer exceeds a
     certain size, the oldest line(s) will be popped from the buffer and sent to output."""
 
+    re_not_a_cmd = re.compile(r"\s*(?:;.*)?$")
+
     def __init__(self, config, out_stream, max_buffer=BUFFER_SIZE):
         """@max_buffer is the largest number of lines that will be kept in memory before
         sending the oldest ones to @out_stream while reading new lines."""
@@ -825,8 +827,17 @@ while True:
     original_speed = current_data[2]
 
     # ahead_layer_z is used for ramp-up scale. Look ahead a few lines because a layer change
-    # may follow immediately after a fan command.
-    ahead_layer_z = gcode.buffer_ahead[2][1] if len(gcode.buffer_ahead) > 2 else current_data[1]
+    # may follow immediately after a fan command. We pick the third non-empty line after the
+    # current one. This is a bit arbitrary but works well enough for now.
+    ahead_layer_z = current_data[1]
+    commands_seen = 0
+    for i in range(0, len(gcode.buffer_ahead)):
+        if GCodeStreamer.re_not_a_cmd.match(gcode.buffer_ahead[i][0]):
+            continue
+        commands_seen += 1
+        if commands_seen > 2 or i + 1 == len(gcode.buffer_ahead):
+            ahead_layer_z = gcode.buffer_ahead[i][1]
+            break
 
     if current_data[0] == "POSTPONED":
         LOG.debug("  -> Postponed fan speed change")
