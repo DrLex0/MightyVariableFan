@@ -110,7 +110,23 @@ class GCodeStreamer():
     keeping a buffer of the last read lines. When a new line is read and the buffer exceeds a
     certain size, the oldest line(s) will be popped from the buffer and sent to output."""
 
+    # Performance: do not capture groups when not needed.
     re_not_a_cmd = re.compile(r"\s*(?:;.*)?$")
+    # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
+    re_fan_cmd = re.compile(r"({M106}|{M107})(\s+S(\d*\.?\d+)|\s|;|$)".format(
+        M106=CMD_106, M107=CMD_107))
+
+    re_print_or_travel = re.compile(r"[^;]*G1(?:\s|;|$)")
+    re_find_m126_7 = re.compile(r"(?:M126|M127)(?:\s|;|$)")
+    re_slow_commands = re.compile(r"(?:M109|M116|M190|M6|T\d+)(?:\s|;|$)")
+
+    # I could try to capture these in one big awful regex, but doing them separately avoids being
+    # locked into the output format of a specific slicer. I even allow "Z1.2 F321 X0.0 G1".
+    re_find_x = re.compile(r"[^;]*X(-?\d*\.?\d+)(?:\s|;|$)")
+    re_find_y = re.compile(r"[^;]*Y(-?\d*\.?\d+)(?:\s|;|$)")
+    re_find_z = re.compile(r"[^;]*Z(\d*\.?\d+)(?:\s|;|$)")
+    re_find_e = re.compile(r"[^;]*E(-?\d*\.?\d+)(?:\s|;|$)")
+    re_find_f = re.compile(r"[^;]*F(\d*\.?\d+)(?:\s|;|$)")
 
     def __init__(self, config, out_stream, max_buffer=BUFFER_SIZE):
         """@max_buffer is the largest number of lines that will be kept in memory before
@@ -119,10 +135,6 @@ class GCodeStreamer():
         self.feed_factor = config.feed_factor
         self.feed_limit_z = config.feed_limit_z
         self.print_times = hasattr(config, 'timings')
-
-        # Assumption: the S argument comes first (in Slic3r there is nothing except S anyway).
-        self.re_fan_cmd = re.compile(r"({M106}|{M107})(\s+S(\d*\.?\d+)|\s|;|$)".format(
-            M106=CMD_106, M107=CMD_107))
 
         self.output = out_stream
         self.max_buffer = max_buffer
@@ -196,12 +208,10 @@ class GCodeStreamer():
     def _update_print_state(self, line):
         """Update the xyzfd state (except the d element), and return an estimate of how
         long this move takes. The estimate does not consider acceleration."""
-        # I could try to capture this in one big awful regex, but doing it separately avoids being
-        # locked into the output format of a specific slicer. I even allow "Z1.2 F321 X0.0 G1".
-        found_x = re.match(r"[^;]*X(-?\d*\.?\d+)(\s|;|$)", line)
-        found_y = re.match(r"[^;]*Y(-?\d*\.?\d+)(\s|;|$)", line)
-        found_z = re.match(r"[^;]*Z(\d*\.?\d+)(\s|;|$)", line)
-        found_f = re.match(r"[^;]*F(\d*\.?\d+)(\s|;|$)", line)
+        found_x = GCodeStreamer.re_find_x.match(line)
+        found_y = GCodeStreamer.re_find_y.match(line)
+        found_z = GCodeStreamer.re_find_z.match(line)
+        found_f = GCodeStreamer.re_find_f.match(line)
 
         xyzfd2 = list(self.xyzfd)  # copy values, not reference
         if found_z:
@@ -234,7 +244,7 @@ class GCodeStreamer():
             feedrate = min(xyzfd2[3], self.feed_limit_z)
             time_estimate = abs(xyzfd2[2] - self.xyzfd[2]) * self.feed_factor / feedrate
         else:
-            found_e = re.match(r"[^;]*E(-?\d*\.?\d+)(\s|;|$)", line)
+            found_e = GCodeStreamer.re_find_e.match(line)
             if found_e:  # retract move, luckily they're relative: no need to remember state
                 time_estimate = abs(float(found_e.group(1))) * self.feed_factor / xyzfd2[3]
 
@@ -260,18 +270,18 @@ class GCodeStreamer():
         time_estimate = 0.0
         duty_cycle = self.xyzfd[4]
 
-        if re.match(r"[^;]*G1(\s|;|$)", line):  # print or travel move
+        if GCodeStreamer.re_print_or_travel.match(line):
             time_estimate = self._update_print_state(line)
-        elif CMD_106 != 'M126' and re.match(r"(M126|M127)(\s|;|$)", line):
+        elif CMD_106 != 'M126' and GCodeStreamer.re_find_m126_7.match(line):
             self.m126_7_found = True
-        elif re.match(r"(M109|M116|M190|M6|T\d+)(\s|;|$)", line):
+        elif GCodeStreamer.re_slow_commands.match(line):
             # Treat 'wait for' as well as tool change commands as taking very long, such that
             # lead time will never cause fan sequences to jump across them.
             time_estimate = 10.0
         elif line.startswith(END_MARKER):
             self.end_of_print = True
         else:
-            fan_command = self.re_fan_cmd.match(line)
+            fan_command = GCodeStreamer.re_fan_cmd.match(line)
             if fan_command:
                 duty_cycle = 0.0
                 if fan_command.group(1) == CMD_106:
@@ -471,8 +481,8 @@ class GCodeStreamer():
     @staticmethod
     def parse_xy(line):
         """Return X, Y components of a G1 command as a tuple. Absent components will be None."""
-        found_x = re.match(r"[^;]*X(-?\d*\.?\d+)(\s|;|$)", line)
-        found_y = re.match(r"[^;]*Y(-?\d*\.?\d+)(\s|;|$)", line)
+        found_x = GCodeStreamer.re_find_x.match(line)
+        found_y = GCodeStreamer.re_find_y.match(line)
         x, y = None, None
         if found_x:
             x = float(found_x.group(1))
@@ -484,11 +494,11 @@ class GCodeStreamer():
     def parse_xyzefc(line):
         """Return X, Y, Z, E, F components and comment string of a command line as an array.
         Absent components will be None, or empty string for the comment."""
-        found_x = re.match(r"[^;]*X(-?\d*\.?\d+)(\s|;|$)", line)
-        found_y = re.match(r"[^;]*Y(-?\d*\.?\d+)(\s|;|$)", line)
-        found_z = re.match(r"[^;]*Z(\d*\.?\d+)(\s|;|$)", line)
-        found_e = re.match(r"[^;]*E(-?\d*\.?\d+)(\s|;|$)", line)
-        found_f = re.match(r"[^;]*F(\d*\.?\d+)(\s|;|$)", line)
+        found_x = GCodeStreamer.re_find_x.match(line)
+        found_y = GCodeStreamer.re_find_y.match(line)
+        found_z = GCodeStreamer.re_find_z.match(line)
+        found_e = GCodeStreamer.re_find_e.match(line)
+        found_f = GCodeStreamer.re_find_f.match(line)
         result = [None, None, None, None, None, line.partition(";")[2]]
         if found_x:
             result[0] = float(found_x.group(1))
@@ -528,7 +538,7 @@ class GCodeStreamer():
         fails if the starting coordinates for this move could not be found before @position,
         or it is not an actual move (G1 command)."""
         data = self.buffer[position]
-        if not re.match(r"[^;]*G1(\s|;|$)", data[0]):
+        if not GCodeStreamer.re_print_or_travel.match(data[0]):
             return False
 
         # Inefficient but acceptable because it should only be done a few times. The alternative
