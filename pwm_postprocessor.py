@@ -78,7 +78,7 @@ SEQUENCE_LENGTH = 3
 #### End of configuration section ####
 
 
-VERSION = '0.4'
+VERSION = '1.1'
 
 # Number of lines in the buffers. More allows to cope with more detailed and faster prints, but
 # is slower and requires more memory to process. If you need more than 128, you're probably

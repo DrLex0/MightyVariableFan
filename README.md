@@ -2,7 +2,7 @@
 
 *Variable fan speed workaround for 3D printers based on the MightyBoard, like the FlashForge Creator Pro*<br>
 by Alexander Thomas, aka Dr. Lex<br>
-Version 1.1a
+Version 1.1
 
 ![Screenshots](images/screenshots-smartwatch.png)<br>
 [Screenshots of web UI on a smartwatch (view larger image) 🔎](images/screenshots-smartwatch.png)
